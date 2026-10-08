@@ -1,0 +1,53 @@
+; Instalador do Process Monitor (Inno Setup 6).
+; Gerado pelo package.ps1, que passa a versao do Cargo.toml em /DAppVersion.
+;
+; Instala por usuario, em %LOCALAPPDATA%\Programs, sem pedir administrador.
+; O app em si pode ser elevado depois pelo botao "Executar como administrador".
+
+#define AppName "Process Monitor"
+#define AppExe "process-monitor.exe"
+#ifndef AppVersion
+  #define AppVersion "0.0.0"
+#endif
+
+[Setup]
+AppId={{8F3C2A51-6B7E-4E0B-9C1D-5A2F7E3B9D40}
+AppName={#AppName}
+AppVersion={#AppVersion}
+AppVerName={#AppName} {#AppVersion}
+AppPublisher=Fernando Garcia
+VersionInfoVersion={#AppVersion}
+DefaultDirName={autopf}\{#AppName}
+DefaultGroupName={#AppName}
+DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+OutputDir=..\dist
+OutputBaseFilename=ProcessMonitor-Setup-{#AppVersion}
+SetupIconFile=..\assets\app.ico
+UninstallDisplayIcon={app}\{#AppExe}
+UninstallDisplayName={#AppName}
+Compression=lzma2/max
+SolidCompression=yes
+WizardStyle=modern
+; Fecha o app aberto antes de sobrescrever o executavel numa atualizacao.
+CloseApplications=yes
+
+[Languages]
+Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
+
+[Tasks]
+; Marcada por padrao: o atalho na area de trabalho faz parte do pedido.
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+
+[Files]
+Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+
+[Icons]
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
