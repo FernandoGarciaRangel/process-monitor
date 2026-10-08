@@ -394,7 +394,8 @@ impl eframe::App for App {
             && self.selected.is_some()
             && self.snap.as_ref().zip(self.selected).is_some_and(|(s, k)| s.find(k).is_some());
         if details_visible {
-            egui::Panel::right("details")
+            // Id novo descarta a largura salva pela versão com o bug do painel que crescia.
+            egui::Panel::right("details_panel")
                 .resizable(true)
                 .default_size(360.0)
                 .size_range(320.0..=480.0)

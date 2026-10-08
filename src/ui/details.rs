@@ -1,6 +1,6 @@
 //! Painel de detalhes do processo selecionado.
 
-use egui::{CornerRadius, Frame, Margin, RichText, Stroke, Ui, vec2};
+use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Ui, vec2};
 use egui_phosphor::regular as icon;
 
 use crate::app::{self, App};
@@ -10,6 +10,18 @@ use crate::theme::{self, CPU, HAIRLINE, INK, INK_2, INK_3, MEMORY, R_SM, WELL};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
+    // O conteúdo é desenhado num filho que não repassa o próprio tamanho ao painel,
+    // e o painel ocupa exatamente o espaço que recebeu. Sem isso, qualquer widget mais
+    // largo que o painel (um nome longo, um botão) o alargava até o máximo, e a parte
+    // de fora ficava cortada pela borda da janela.
+    let rect = ui.max_rect();
+    let mut content = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+    content.set_clip_rect(rect.intersect(ui.clip_rect()));
+    body(app, &mut content);
+    ui.allocate_rect(rect, egui::Sense::hover());
+}
+
+fn body(app: &mut App, ui: &mut Ui) {
     let (Some(snap), Some(key)) = (app.snap.clone(), app.selected) else { return };
     let Some(p) = snap.find(key) else { return };
     let protected = app.is_protected(key, &p.name);
@@ -71,7 +83,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 ui.label(RichText::new("Processo pai").font(theme::regular(12.0)).color(INK_3));
                 match &parent {
                     Some((pk, name)) => {
-                        if ui.link(RichText::new(format!("{name} · {}", pk.pid)).font(theme::regular(12.5))).clicked() {
+                        // Botão sem moldura em vez de `link`, que não corta nomes longos.
+                        let link = egui::Button::new(RichText::new(format!("{name} · {}", pk.pid)).font(theme::regular(12.5)).color(CPU))
+                            .frame(false)
+                            .truncate();
+                        if ui.add(link).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                             app.select(Some(*pk));
                             app.scroll_to_selected = true;
                         }
@@ -115,7 +131,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     let text = RichText::new(format!("{}  {} · {}", icon::ARROW_ELBOW_DOWN_RIGHT, child.display_name(), child.pid))
                         .font(theme::regular(12.5))
                         .color(INK_2);
-                    if ui.add(egui::Button::new(text).frame_when_inactive(false)).clicked() {
+                    if ui.add(egui::Button::new(text).frame_when_inactive(false).truncate()).clicked() {
                         chosen = Some(child.key());
                     }
                 }
@@ -144,19 +160,22 @@ fn header(
         let texture = app.icons.get(exe);
         widgets::process_icon(ui, texture.as_ref(), 32.0);
         ui.add_space(6.0);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            ui.add(egui::Label::new(RichText::new(title).font(theme::semibold(17.0)).color(INK)).truncate());
-            let meta = match user {
-                Some(u) => format!("{exe_name} · PID {pid} · {u}"),
-                None => format!("{exe_name} · PID {pid}"),
-            };
-            ui.label(RichText::new(meta).font(theme::regular(12.0)).color(INK_3));
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+        // O × entra primeiro, pela direita, e o título fica com o que sobra. Na ordem
+        // inversa, um título cortado com reticências ocupava a linha inteira e o ×
+        // era empurrado para fora do painel.
+        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
             if widgets::icon_button(ui, icon::X, "Fechar detalhes (Esc)").clicked() {
                 app.select(None);
             }
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.add(egui::Label::new(RichText::new(title).font(theme::semibold(17.0)).color(INK)).truncate());
+                let meta = match user {
+                    Some(u) => format!("{exe_name} · PID {pid} · {u}"),
+                    None => format!("{exe_name} · PID {pid}"),
+                };
+                ui.add(egui::Label::new(RichText::new(meta).font(theme::regular(12.0)).color(INK_3)).truncate());
+            });
         });
     });
 }
@@ -180,16 +199,20 @@ fn live_charts(app: &App, ui: &mut Ui, cpu: f32, memory: u64) {
                 MEMORY,
             ),
         ] {
+            // O Frame herda o layout do pai, que aqui é horizontal: sem o `vertical`, o
+            // gráfico ia para o lado do rótulo e o cartão saía mais largo que o painel.
             widgets::card().inner_margin(Margin::same(10)).show(ui, |ui| {
-                ui.set_width(width - 22.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).font(theme::regular(11.5)).color(INK_3));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(value).font(theme::semibold(13.0)).color(color));
+                ui.vertical(|ui| {
+                    ui.set_width(width - 22.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(label).font(theme::regular(11.5)).color(INK_3));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(value).font(theme::semibold(13.0)).color(color));
+                        });
                     });
+                    ui.add_space(4.0);
+                    widgets::chart(ui, vec2(ui.available_width(), 44.0), &[layer], max, ChartStyle::SPARK);
                 });
-                ui.add_space(4.0);
-                widgets::chart(ui, vec2(ui.available_width(), 44.0), &[layer], max, ChartStyle::SPARK);
             });
         }
     });

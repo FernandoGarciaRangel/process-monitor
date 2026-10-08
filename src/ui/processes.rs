@@ -243,7 +243,9 @@ fn search_box(app: &mut App, ui: &mut Ui) {
         .inner_margin(Margin::symmetric(10, 0))
         .show(ui, |ui| {
             ui.set_width(width);
-            ui.horizontal(|ui| {
+            // Esquerda para a direita explícito: `horizontal` herdaria a direção da barra,
+            // que é montada da direita para a esquerda, e a lupa e o × trocariam de lado.
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 ui.set_height(30.0);
                 ui.label(RichText::new(icon::MAGNIFYING_GLASS).font(theme::regular(14.0)).color(INK_3));
                 let clear_width = if app.search.is_empty() { 0.0 } else { 26.0 };

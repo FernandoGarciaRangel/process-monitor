@@ -94,15 +94,26 @@ fn cpu(ui: &mut Ui, s: &Snapshot) {
             ui.spacing_mut().item_spacing.x = 8.0;
             for (i, series) in series_chunk.iter().enumerate() {
                 let core = row_idx * per_row + i;
+                // `vertical`: o Frame herdaria o layout horizontal da linha de cartões.
                 widgets::card().inner_margin(Margin::same(8)).show(ui, |ui| {
-                    ui.set_width(cell_w - 18.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{core}")).font(theme::regular(11.0)).color(INK_3));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(RichText::new(format::percent(series.last())).font(theme::regular(11.0)).color(INK_2));
+                    ui.vertical(|ui| {
+                        ui.set_width(cell_w - 18.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("{core}")).font(theme::regular(11.0)).color(INK_3));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(format::percent(series.last())).font(theme::regular(11.0)).color(INK_2),
+                                );
+                            });
                         });
+                        widgets::chart(
+                            ui,
+                            vec2(ui.available_width(), 36.0),
+                            &[Layer::area(series, CPU)],
+                            100.0,
+                            ChartStyle::SPARK,
+                        );
                     });
-                    widgets::chart(ui, vec2(ui.available_width(), 36.0), &[Layer::area(series, CPU)], 100.0, ChartStyle::SPARK);
                 });
             }
         });
