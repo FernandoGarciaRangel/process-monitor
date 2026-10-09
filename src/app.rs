@@ -9,7 +9,8 @@ use egui_phosphor::regular as icon;
 
 use crate::icons::IconCache;
 use crate::platform::{self, KillError};
-use crate::sampler::{ProcKey, Sampler, Series, Snapshot};
+use crate::ports::{self, Kind, PortRange, Prober, Statuses, Target};
+use crate::sampler::{ProcInfo, ProcKey, Sampler, Series, Snapshot};
 use crate::theme::{self, GRAPHITE_0, GRAPHITE_3, HAIRLINE, HAIRLINE_STRONG, INK, INK_2, INK_3, R_LG, R_MD};
 use crate::ui;
 use crate::ui::widgets;
@@ -17,6 +18,7 @@ use crate::ui::widgets;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
     Processes,
+    Ports,
     Cpu,
     Memory,
     Disk,
@@ -33,6 +35,16 @@ pub enum SortKey {
     Memory,
     Disk,
     Gpu,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortSort {
+    Port,
+    Name,
+    Pid,
+    Response,
+    Memory,
+    Uptime,
 }
 
 /// Pedido de finalização aguardando confirmação no modal.
@@ -99,10 +111,31 @@ pub struct App {
     pub elevated: bool,
     pub interval_ms: u64,
     protected_cache: HashMap<ProcKey, bool>,
+
+    pub prober: Prober,
+    /// Resultado mais recente da sondagem HTTP, por (porta, PID).
+    pub port_status: Arc<Statuses>,
+    pub port_ranges: Vec<PortRange>,
+    /// Como o usuário digitou as faixas; é o que se guarda entre execuções.
+    pub port_ranges_text: String,
+    /// Todas as portas em escuta, não só as de desenvolvimento e das faixas.
+    pub ports_all: bool,
+    pub port_search: String,
+    pub port_sort: PortSort,
+    pub port_sort_desc: bool,
+    /// Porta escolhida na tela de portas; o processo dela fica em `selected`.
+    pub selected_port: Option<u16>,
+    pub scroll_to_port: bool,
+    /// Portas de desenvolvimento e das faixas, para o contador da barra lateral.
+    pub dev_port_count: usize,
+    port_targets: Vec<Target>,
+    prober_active: bool,
 }
 
 const INTERVAL_KEY: &str = "interval_ms";
 const GROUP_KEY: &str = "group";
+const PORT_RANGES_KEY: &str = "port_ranges";
+const PORTS_ALL_KEY: &str = "ports_all";
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -113,6 +146,9 @@ impl App {
             .filter(|v| [500, 1000, 2000].contains(v))
             .unwrap_or(1000);
         let group = stored(GROUP_KEY).is_some_and(|v| v == "1");
+        let port_ranges_text = stored(PORT_RANGES_KEY)
+            .filter(|t| ports::parse_ranges(t).is_ok())
+            .unwrap_or_else(|| ports::DEFAULT_RANGES.to_owned());
         Self {
             sampler: Sampler::spawn(cc.egui_ctx.clone(), Duration::from_millis(interval_ms)),
             snap: None,
@@ -131,6 +167,19 @@ impl App {
             elevated: platform::is_elevated(),
             interval_ms,
             protected_cache: HashMap::new(),
+            prober: Prober::spawn(cc.egui_ctx.clone()),
+            port_status: Arc::default(),
+            port_ranges: ports::parse_ranges(&port_ranges_text).unwrap_or_default(),
+            port_ranges_text,
+            ports_all: stored(PORTS_ALL_KEY).is_some_and(|v| v == "1"),
+            port_search: String::new(),
+            port_sort: PortSort::Port,
+            port_sort_desc: false,
+            selected_port: None,
+            scroll_to_port: false,
+            dev_port_count: 0,
+            port_targets: Vec::new(),
+            prober_active: false,
         }
     }
 
@@ -142,8 +191,50 @@ impl App {
     pub fn select(&mut self, key: Option<ProcKey>) {
         if self.selected != key {
             self.selected = key;
+            self.selected_port = None;
             self.proc_history = ProcHistory::default();
             self.track_selected();
+        }
+    }
+
+    /// Escolhe uma linha da tela de portas: a porta e o processo que a escuta.
+    pub fn select_port(&mut self, key: ProcKey, port: u16) {
+        self.select(Some(key));
+        self.selected_port = Some(port);
+    }
+
+    /// Troca as faixas de portas. O texto inválido fica no campo, mas não é aplicado.
+    pub fn set_port_ranges(&mut self, text: String) -> Result<(), String> {
+        let ranges = ports::parse_ranges(&text);
+        self.port_ranges_text = text;
+        self.port_ranges = ranges?;
+        self.sync_ports();
+        Ok(())
+    }
+
+    /// Portas que vale sondar: as de processos de desenvolvimento que falam HTTP e
+    /// qualquer uma dentro das faixas. Só manda para a thread quando a lista muda.
+    pub fn sync_ports(&mut self) {
+        let Some(snap) = self.snap.clone() else { return };
+        let procs: HashMap<u32, &ProcInfo> = snap.processes.iter().map(|p| (p.pid, p)).collect();
+        let mut dev = 0;
+        let mut targets = Vec::new();
+        for l in &snap.listeners {
+            let proc = procs.get(&l.pid).copied();
+            let kind = proc.and_then(ports::classify);
+            let in_range = ports::in_ranges(&self.port_ranges, l.port);
+            if kind.is_some() || in_range {
+                dev += 1;
+            }
+            let http = in_range || kind.zip(proc).is_some_and(|(k, p)| ports::likely_http(k, &p.cmd));
+            if http {
+                targets.push(Target { port: l.port, pid: l.pid, addr: l.connect_addr(), api: kind == Some(Kind::Python) });
+            }
+        }
+        self.dev_port_count = dev;
+        if targets != self.port_targets {
+            self.port_targets = targets.clone();
+            self.prober.set_targets(targets);
         }
     }
 
@@ -182,6 +273,30 @@ impl App {
                 targets: vec![KillTarget::of(proc)],
             });
         }
+    }
+
+    /// Finalizar o processo que escuta `port`, com a porta no texto da confirmação.
+    pub fn request_kill_port(&mut self, key: ProcKey, port: u16) {
+        let Some(snap) = self.snap.clone() else { return };
+        let Some(proc) = snap.find(key) else { return };
+        let label = ports::classify(proc)
+            .and_then(|_| ports::project_dir(proc))
+            .and_then(|d| ports::project_label(&d))
+            .unwrap_or_else(|| proc.display_name().to_owned());
+        let others = snap.listeners.iter().filter(|l| l.pid == key.pid && l.port != port).count();
+        let also = match others {
+            0 => String::new(),
+            1 => " Ele também escuta em outra porta, que fecha junto.".to_owned(),
+            n => format!(" Ele também escuta em outras {n} portas, que fecham junto."),
+        };
+        self.confirm = Some(KillRequest {
+            title: format!("Liberar a porta {port}?"),
+            detail: format!(
+                "{label} ({}, PID {}) será encerrado.{also} Dados não salvos serão perdidos.",
+                proc.name, key.pid
+            ),
+            targets: vec![KillTarget::of(proc)],
+        });
     }
 
     /// `exe` é o nome do executável, a chave dos grupos.
@@ -377,7 +492,19 @@ impl eframe::App for App {
             }
             self.snap = Some(latest);
             self.track_selected();
+            self.sync_ports();
         }
+        // Sonda só quando alguém vê o resultado: na tela de portas ou na seção de portas
+        // do painel de detalhes. Fora disso, a resposta mostrada ficaria velha.
+        let selected_listens = self.selected.zip(self.snap.as_ref()).is_some_and(|(k, s)| {
+            s.listeners.iter().any(|l| l.pid == k.pid)
+        });
+        let ports_visible = self.view == View::Ports || (self.view == View::Processes && selected_listens);
+        if ports_visible != self.prober_active {
+            self.prober_active = ports_visible;
+            self.prober.set_active(ports_visible);
+        }
+        self.port_status = self.prober.latest();
         self.icons.poll(ctx);
     }
 
@@ -390,7 +517,7 @@ impl eframe::App for App {
             .frame(Frame::NONE.fill(GRAPHITE_0).inner_margin(Margin { left: 12, right: 12, top: 14, bottom: 12 }))
             .show(ui, |ui| ui::sidebar::show(self, ui));
 
-        let details_visible = self.view == View::Processes
+        let details_visible = matches!(self.view, View::Processes | View::Ports)
             && self.selected.is_some()
             && self.snap.as_ref().zip(self.selected).is_some_and(|(s, k)| s.find(k).is_some());
         if details_visible {
@@ -409,6 +536,7 @@ impl eframe::App for App {
                 None => loading(ui),
                 Some(snap) => match self.view {
                     View::Processes => ui::processes::show(self, ui, &snap),
+                    View::Ports => ui::ports::show(self, ui, &snap),
                     other => ui::performance::show(self, ui, &snap, other),
                 },
             });
@@ -420,6 +548,11 @@ impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(INTERVAL_KEY, self.interval_ms.to_string());
         storage.set_string(GROUP_KEY, if self.group { "1" } else { "0" }.to_owned());
+        // Faixas inválidas não são salvas: na próxima abertura volta a última que valia.
+        if ports::parse_ranges(&self.port_ranges_text).is_ok() {
+            storage.set_string(PORT_RANGES_KEY, self.port_ranges_text.clone());
+        }
+        storage.set_string(PORTS_ALL_KEY, if self.ports_all { "1" } else { "0" }.to_owned());
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

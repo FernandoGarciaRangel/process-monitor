@@ -1,5 +1,5 @@
 //! Chamadas Win32 que o sysinfo não cobre: finalizar com verificação de PID,
-//! processos críticos, elevação, Explorer e ícones de executáveis.
+//! processos críticos, elevação, Explorer, navegador e ícones de executáveis.
 
 use std::os::windows::process::CommandExt;
 use std::path::Path;
@@ -229,6 +229,13 @@ pub fn open_in_explorer(path: &Path) {
     let _ = std::process::Command::new("explorer.exe")
         .raw_arg(format!("/select,\"{}\"", path.display()))
         .spawn();
+}
+
+/// Abre uma URL no navegador padrão, ou uma pasta no Explorer.
+pub fn shell_open(target: &str) {
+    unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(target), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+    }
 }
 
 /// Ícone grande (32 px) do executável em RGBA, ou `None` se o arquivo não tiver ícone.

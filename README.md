@@ -15,8 +15,13 @@ permite finalizá-los.
   de CPU, memória, disco e GPU, com calor âmbar nas células conforme a carga. Busca
   por nome, PID, caminho ou linha de comando (Ctrl+F; vírgula separa termos),
   ordenação por coluna e agrupamento por executável.
-- **Detalhes:** caminho, linha de comando, diretório de trabalho, processo pai e
-  filhos, início e tempo de execução.
+- **Portas:** as portas TCP em escuta e quem as ocupa. Servidores de desenvolvimento
+  (Vite, Next.js, Node, Python, .NET…) aparecem com o nome do projeto, o título da
+  página ou da API (OpenAPI) e o tempo de resposta HTTP; as faixas de portas
+  configuráveis (padrão `5173-5183, 8000-8010`) mostram em chips o que está livre.
+  Abre no navegador e libera a porta finalizando o processo, com confirmação.
+- **Detalhes:** caminho, linha de comando, diretório de trabalho, portas em escuta,
+  processo pai e filhos, início e tempo de execução.
 - **Finalizar:** processo, árvore ou grupo, sempre com confirmação. Antes de finalizar,
   confere se o PID ainda é do mesmo processo; processos críticos do Windows ficam
   bloqueados. Sem administrador, processos do sistema não podem ser finalizados — o
@@ -50,6 +55,7 @@ administrador e cria atalhos na área de trabalho e no Menu Iniciar.
 |---|---|
 | `src/sampler.rs` | Thread de coleta (sysinfo), histórico e árvore de processos |
 | `src/gpu.rs` | Uso de GPU pelos contadores de desempenho do Windows (PDH) e DXGI |
+| `src/ports.rs` | Portas em escuta (IP Helper), classificação e sondagem HTTP |
 | `src/platform.rs` | Win32: finalizar com verificação, elevação, ícones, descrição do arquivo |
 | `src/theme.rs` | Tokens visuais e configuração do egui |
 | `src/ui/` | Barra lateral, tabela de processos, detalhes e telas de desempenho |

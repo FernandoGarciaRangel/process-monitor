@@ -111,6 +111,19 @@ A thread do `sampler` é dona do sysinfo e publica um `Arc<Snapshot>`; a UI só 
 repinta quando chega dado novo. Não faça chamada de sistema por quadro na UI
 (`is_protected` tem cache). Meta: o app abaixo de 2% de CPU com intervalo de 1 s.
 
+## Portas: sondagem HTTP
+
+`src/ports.rs` lê as portas com `GetExtendedTcpTable` na thread de coleta; o GET
+de cada uma roda na thread `ports`, só com a tela de portas (ou o painel de
+detalhes de um processo com porta) aberta.
+
+- Conecte no endereço em que a porta escuta (`Listener::connect_addr`): o Vite no
+  Windows escuta só em `::1`, e `127.0.0.1` é recusado.
+- O timeout de leitura é 4 s de propósito: servidor parado há dias tem a memória
+  paginada e demora na primeira resposta. Com 1,5 s ele aparecia como calado.
+- Python só é sondado com indício de servidor web na linha de comando: kernel do
+  Jupyter e `debugpy` escutam portas que não falam HTTP.
+
 ## Windows em português
 
 O Windows devolve nomes localizados: a conta `S-1-5-18` é "SISTEMA", as descrições

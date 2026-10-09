@@ -17,6 +17,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if nav_item(ui, app.view == View::Processes, icon::LIST_BULLETS, "Processos", &count.to_string()).clicked() {
         app.view = View::Processes;
     }
+    // O contador acompanha o filtro da tela: só desenvolvimento e faixas, ou todas.
+    let ports = match &app.snap {
+        Some(s) if app.ports_all => s.listeners.len(),
+        Some(_) => app.dev_port_count,
+        None => 0,
+    };
+    if nav_item(ui, app.view == View::Ports, icon::PLUGS_CONNECTED, "Portas", &ports.to_string()).clicked() {
+        app.view = View::Ports;
+    }
 
     ui.add_space(12.0);
     widgets::section_label(ui, "Desempenho");

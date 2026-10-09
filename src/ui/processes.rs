@@ -3,14 +3,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use egui::{Align, Align2, Color32, CornerRadius, Frame, Key, Layout, Margin, RichText, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align, Align2, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, pos2, vec2};
 use egui_extras::{Column, TableBuilder};
 use egui_phosphor::regular as icon;
 
 use crate::app::{App, SortKey};
 use crate::format;
 use crate::sampler::{ProcInfo, ProcKey, Snapshot};
-use crate::theme::{self, HAIRLINE, INK, INK_2, INK_3, INK_4, R_SM, WELL};
+use crate::theme::{self, HAIRLINE, INK, INK_2, INK_3, INK_4, R_SM};
 use crate::ui::widgets;
 
 const ROW_HEIGHT: f32 = 30.0;
@@ -229,46 +229,15 @@ fn toolbar(app: &mut App, ui: &mut Ui, snap: &Snapshot, visible: usize) {
             }
 
             ui.add_space(4.0);
-            search_box(app, ui);
+            widgets::search_box(
+                ui,
+                &mut app.search,
+                "search",
+                "Nome, PID ou caminho",
+                "Ctrl+F. Use vírgula para buscar vários termos de uma vez.",
+            );
         });
     });
-}
-
-fn search_box(app: &mut App, ui: &mut Ui) {
-    let width = (ui.available_width() - 8.0).clamp(160.0, 340.0);
-    Frame::NONE
-        .fill(WELL)
-        .stroke(Stroke::new(1.0, HAIRLINE))
-        .corner_radius(CornerRadius::same(R_SM))
-        .inner_margin(Margin::symmetric(10, 0))
-        .show(ui, |ui| {
-            ui.set_width(width);
-            // Esquerda para a direita explícito: `horizontal` herdaria a direção da barra,
-            // que é montada da direita para a esquerda, e a lupa e o × trocariam de lado.
-            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                ui.set_height(30.0);
-                ui.label(RichText::new(icon::MAGNIFYING_GLASS).font(theme::regular(14.0)).color(INK_3));
-                let clear_width = if app.search.is_empty() { 0.0 } else { 26.0 };
-                let edit = egui::TextEdit::singleline(&mut app.search)
-                    .id_salt("search")
-                    .hint_text(RichText::new("Nome, PID ou caminho").color(INK_4))
-                    .frame(Frame::NONE)
-                    .font(theme::regular(13.0))
-                    .desired_width(ui.available_width() - clear_width);
-                let response = ui.add(edit);
-                if ui.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
-                    response.request_focus();
-                }
-                if response.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
-                    app.search.clear();
-                }
-                if !app.search.is_empty() && widgets::icon_button(ui, icon::X, "Limpar busca").clicked() {
-                    app.search.clear();
-                }
-            });
-        })
-        .response
-        .on_hover_text("Ctrl+F. Use vírgula para buscar vários termos de uma vez.");
 }
 
 fn header_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, col: Col) {
@@ -323,7 +292,7 @@ fn proc_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, p: &ProcInfo, child: b
             ui.add_space(4.0);
             name_label(ui, p.display_name(), p.exe_hint(), theme::regular(13.0));
         }
-        Col::Pid => right_text(ui, &p.pid.to_string(), INK_3),
+        Col::Pid => widgets::right_text(ui, &p.pid.to_string(), INK_3),
         Col::User => {
             ui.add_space(8.0);
             let user = p.user.as_deref().unwrap_or("—");
@@ -378,11 +347,6 @@ fn count_pill(ui: &mut Ui, n: usize) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, 18.0), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(9), theme::GRAPHITE_3);
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, INK_2);
-}
-
-fn right_text(ui: &mut Ui, text: &str, color: Color32) {
-    let rect = ui.max_rect();
-    ui.painter().text(pos2(rect.right() - 10.0, rect.center().y), Align2::RIGHT_CENTER, text, theme::regular(12.5), color);
 }
 
 fn proc_menu(app: &mut App, ui: &mut Ui, p: &ProcInfo, actions: &mut Vec<Action>) {
@@ -496,7 +460,7 @@ fn empty_state(ui: &mut Ui, search: &str) {
 fn cpu_heat(v: f32) -> f32 {
     v / 60.0
 }
-fn mem_heat(bytes: u64, total: u64) -> f32 {
+pub(super) fn mem_heat(bytes: u64, total: u64) -> f32 {
     crate::sampler::percent_of(bytes, total) / 20.0
 }
 fn disk_heat(rate: f64) -> f32 {
@@ -506,7 +470,7 @@ fn gpu_heat(v: f32) -> f32 {
     v / 60.0
 }
 
-fn search_terms(query: &str) -> Vec<String> {
+pub(super) fn search_terms(query: &str) -> Vec<String> {
     query.split(',').map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty()).collect()
 }
 
