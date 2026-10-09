@@ -104,6 +104,9 @@ pub struct App {
     pub sort_desc: bool,
     pub selected: Option<ProcKey>,
     pub scroll_to_selected: bool,
+    /// Posição de cada linha no quadro anterior, para desempatar a ordenação.
+    pub prev_rank: HashMap<ProcKey, usize>,
+    pub prev_group_rank: HashMap<String, usize>,
     pub proc_history: ProcHistory,
     pub confirm: Option<KillRequest>,
     pub toasts: Vec<Toast>,
@@ -160,6 +163,8 @@ impl App {
             sort_desc: true,
             selected: None,
             scroll_to_selected: false,
+            prev_rank: HashMap::new(),
+            prev_group_rank: HashMap::new(),
             proc_history: ProcHistory::default(),
             confirm: None,
             toasts: Vec::new(),

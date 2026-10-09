@@ -18,7 +18,7 @@ use crate::platform;
 use crate::ports::{self, Kind, Listener, PortRange, PortStatus, Reply, Statuses};
 use crate::sampler::{ProcInfo, ProcKey, Snapshot};
 use crate::theme::{self, GRAPHITE_3, HAIRLINE, HAIRLINE_STRONG, INK, INK_2, INK_3, INK_4, NETWORK, R_SM};
-use crate::ui::processes::{mem_heat, search_terms};
+use crate::ui::processes::{MB, band, mem_heat, search_terms};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
 const ROW_HEIGHT: f32 = 42.0;
@@ -780,8 +780,13 @@ fn compare(a: &Row, b: &Row, key: PortSort) -> std::cmp::Ordering {
         PortSort::Port => by_port,
         PortSort::Name => a.name().to_lowercase().cmp(&b.name().to_lowercase()).then(by_port),
         PortSort::Pid => a.l.pid.cmp(&b.l.pid).then(by_port),
-        PortSort::Response => response_rank(a).total_cmp(&response_rank(b)).then(by_port),
-        PortSort::Memory => a.p.map(|p| p.memory).cmp(&b.p.map(|p| p.memory)).then(by_port),
+        // Em faixas, como na tela de processos: o tempo de resposta e a memória oscilam a
+        // cada rodada, e o valor exato fazia portas parecidas trocarem de lugar.
+        PortSort::Response => band(response_rank(a) as f64, 1.0).cmp(&band(response_rank(b) as f64, 1.0)).then(by_port),
+        PortSort::Memory => {
+            let mem = |r: &Row| r.p.map_or(-1, |p| band(p.memory as f64, MB));
+            mem(a).cmp(&mem(b)).then(by_port)
+        }
         PortSort::Uptime => a.p.map(|p| p.run_time).cmp(&b.p.map(|p| p.run_time)).then(by_port),
     }
 }

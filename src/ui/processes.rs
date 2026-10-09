@@ -58,13 +58,13 @@ impl Col {
 
     fn column(self) -> Column {
         match self {
-            Col::Name => Column::remainder().at_least(170.0).clip(true),
-            Col::Pid => Column::exact(66.0),
-            Col::User => Column::exact(118.0).clip(true),
-            Col::Cpu => Column::exact(74.0),
-            Col::Memory => Column::exact(92.0),
-            Col::Disk => Column::exact(88.0),
-            Col::Gpu => Column::exact(66.0),
+            Col::Name => Column::remainder().at_least(170.0).clip(true).resizable(false),
+            Col::Pid => Column::initial(66.0).at_least(48.0).clip(true),
+            Col::User => Column::initial(118.0).at_least(60.0).clip(true),
+            Col::Cpu => Column::initial(74.0).at_least(56.0).clip(true),
+            Col::Memory => Column::initial(92.0).at_least(64.0).clip(true),
+            Col::Disk => Column::initial(88.0).at_least(64.0).clip(true),
+            Col::Gpu => Column::initial(66.0).at_least(48.0).clip(true),
         }
     }
 }
@@ -98,6 +98,19 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
     let terms = search_terms(&app.search);
     let visible: Vec<&ProcInfo> = snap.processes.iter().filter(|p| matches(p, &terms)).collect();
     let rows = build_rows(app, &visible, !terms.is_empty());
+    // A ordem deste quadro desempata o próximo: processos na mesma faixa não trocam de lugar.
+    app.prev_rank.clear();
+    app.prev_group_rank.clear();
+    for (i, row) in rows.iter().enumerate() {
+        match row {
+            Row::Proc { p, .. } => {
+                app.prev_rank.insert(p.key(), i);
+            }
+            Row::Group(g) => {
+                app.prev_group_rank.insert(g.name.to_owned(), i);
+            }
+        }
+    }
 
     toolbar(app, ui, snap, visible.len());
     ui.add_space(12.0);
@@ -131,7 +144,8 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
     let mut table = TableBuilder::new(ui)
         .id_salt("processes")
         .striped(false)
-        .resizable(false)
+        // Arrastar a divisória à direita de uma coluna muda a largura dela; Nome absorve a diferença.
+        .resizable(true)
         .sense(Sense::click())
         .cell_layout(Layout::left_to_right(Align::Center))
         .min_scrolled_height(0.0)
@@ -491,10 +505,14 @@ fn matches(p: &ProcInfo, terms: &[String]) -> bool {
 
 fn build_rows<'a>(app: &App, procs: &[&'a ProcInfo], searching: bool) -> Vec<Row<'a>> {
     let (key, desc) = (app.sort, app.sort_desc);
+    let rank = |p: &ProcInfo| app.prev_rank.get(&p.key()).copied().unwrap_or(usize::MAX);
     let order = |a: &ProcInfo, b: &ProcInfo| {
         let ord = compare(a, b, key);
-        if desc { ord.reverse() } else { ord }
+        let ord = if desc { ord.reverse() } else { ord };
+        // Empate na faixa: fica quem já estava na frente; depois, o PID.
+        ord.then(rank(a).cmp(&rank(b))).then(a.pid.cmp(&b.pid))
     };
+    let group_rank = |name: &str| app.prev_group_rank.get(name).copied().unwrap_or(usize::MAX);
 
     if !app.group {
         let mut list: Vec<&ProcInfo> = procs.to_vec();
@@ -523,12 +541,13 @@ fn build_rows<'a>(app: &App, procs: &[&'a ProcInfo], searching: bool) -> Vec<Row
                 .display_name()
                 .to_lowercase()
                 .cmp(&b.members[0].display_name().to_lowercase()),
-            SortKey::Cpu => a.cpu.total_cmp(&b.cpu),
-            SortKey::Memory => a.memory.cmp(&b.memory),
-            SortKey::Disk => a.disk.total_cmp(&b.disk),
-            SortKey::Gpu => a.gpu.total_cmp(&b.gpu),
+            SortKey::Cpu => band(a.cpu as f64, 0.1).cmp(&band(b.cpu as f64, 0.1)),
+            SortKey::Memory => band(a.memory as f64, MB).cmp(&band(b.memory as f64, MB)),
+            SortKey::Disk => band(a.disk, KB).cmp(&band(b.disk, KB)),
+            SortKey::Gpu => band(a.gpu as f64, 0.1).cmp(&band(b.gpu as f64, 0.1)),
         };
-        if desc { ord.reverse() } else { ord }
+        let ord = if desc { ord.reverse() } else { ord };
+        ord.then(group_rank(a.name).cmp(&group_rank(b.name))).then(a.name.cmp(b.name))
     });
 
     let mut rows = Vec::new();
@@ -556,11 +575,22 @@ fn compare(a: &ProcInfo, b: &ProcInfo, key: SortKey) -> std::cmp::Ordering {
         }
         SortKey::Pid => a.pid.cmp(&b.pid),
         SortKey::User => a.user.cmp(&b.user).then(a.name.cmp(&b.name)),
-        SortKey::Cpu => a.cpu.total_cmp(&b.cpu).then(a.memory.cmp(&b.memory)),
-        SortKey::Memory => a.memory.cmp(&b.memory),
-        SortKey::Disk => a.disk_rate().total_cmp(&b.disk_rate()),
-        SortKey::Gpu => a.gpu.total_cmp(&b.gpu),
+        SortKey::Cpu => band(a.cpu as f64, 0.1).cmp(&band(b.cpu as f64, 0.1)),
+        SortKey::Memory => band(a.memory as f64, MB).cmp(&band(b.memory as f64, MB)),
+        SortKey::Disk => band(a.disk_rate(), KB).cmp(&band(b.disk_rate(), KB)),
+        SortKey::Gpu => band(a.gpu as f64, 0.1).cmp(&band(b.gpu as f64, 0.1)),
     }
+}
+
+const KB: f64 = 1024.0;
+pub(super) const MB: f64 = 1024.0 * 1024.0;
+
+/// Faixa logarítmica de ~15% para ordenar métricas que oscilam a cada coleta.
+/// Comparar o valor exato fazia vizinhos parecidos (352,1 MB e 352,4 MB) trocarem
+/// de lugar a todo segundo; dentro da mesma faixa vale a ordem anterior.
+/// Abaixo de `floor` tudo cai na faixa 0 (os "0%" não disputam posição).
+pub(super) fn band(value: f64, floor: f64) -> i32 {
+    if value < floor { 0 } else { ((value / floor).ln() / 1.15f64.ln()) as i32 + 1 }
 }
 
 #[cfg(test)]
@@ -590,5 +620,19 @@ mod tests {
         a.cpu = 5.0;
         b.cpu = 50.0;
         assert_eq!(compare(&a, &b, SortKey::Cpu), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn oscilacao_pequena_nao_reordena() {
+        let mut a = proc(1, None, 1, "a");
+        let mut b = proc(2, None, 1, "b");
+        a.memory = 352 * 1024 * 1024 + 100 * 1024;
+        b.memory = 352 * 1024 * 1024 + 400 * 1024;
+        assert_eq!(compare(&a, &b, SortKey::Memory), std::cmp::Ordering::Equal);
+        b.memory = 700 * 1024 * 1024;
+        assert_eq!(compare(&a, &b, SortKey::Memory), std::cmp::Ordering::Less);
+        assert_eq!(band(0.0, 0.1), 0);
+        assert_eq!(band(0.05, 0.1), 0);
+        assert!(band(50.0, 0.1) > band(5.0, 0.1));
     }
 }
