@@ -3,8 +3,9 @@
 use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Ui, vec2};
 use egui_phosphor::regular as icon;
 
-use crate::app::{self, App};
+use crate::app::{self, App, View};
 use crate::format;
+use crate::ports::{Listener, Reply};
 use crate::sampler::ProcKey;
 use crate::theme::{self, CPU, HAIRLINE, INK, INK_2, INK_3, MEMORY, R_SM, WELL};
 use crate::ui::widgets::{self, ChartStyle, Layer};
@@ -66,6 +67,12 @@ fn body(app: &mut App, ui: &mut Ui) {
             ui.add_space(16.0);
             live_charts(app, ui, p.cpu, p.memory);
             ui.add_space(18.0);
+
+            let listening: Vec<&Listener> = snap.listeners.iter().filter(|l| l.pid == p.pid).collect();
+            if !listening.is_empty() {
+                ports_section(app, ui, key, &listening);
+                ui.add_space(18.0);
+            }
 
             widgets::section_label(ui, "Arquivo");
             ui.add_space(6.0);
@@ -216,6 +223,48 @@ fn live_charts(app: &App, ui: &mut Ui, cpu: f32, memory: u64) {
             });
         }
     });
+}
+
+/// Portas em que o processo escuta, com a última resposta HTTP. O número leva à tela de portas.
+fn ports_section(app: &mut App, ui: &mut Ui, key: ProcKey, listening: &[&Listener]) {
+    const MAX: usize = 12;
+    widgets::section_label(ui, &format!("Portas em escuta · {}", listening.len()));
+    ui.add_space(4.0);
+    for l in listening.iter().take(MAX) {
+        let reply = app.port_status.get(&(l.port, l.pid)).and_then(|s| s.reply);
+        ui.horizontal(|ui| {
+            let number = egui::Button::new(RichText::new(l.port.to_string()).font(theme::semibold(13.0)).color(CPU)).frame(false);
+            if ui.add(number).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ver na tela de portas").clicked() {
+                app.view = View::Ports;
+                app.select_port(key, l.port);
+                app.scroll_to_port = true;
+            }
+            // Os botões entram primeiro, pela direita; o texto fica com o que sobra e corta.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if widgets::icon_button(ui, icon::COPY, "Copiar URL").clicked() {
+                    ui.ctx().copy_text(l.url());
+                }
+                if matches!(reply, Some(Reply::Http { .. }))
+                    && widgets::icon_button(ui, icon::ARROW_SQUARE_OUT, "Abrir no navegador").clicked()
+                {
+                    crate::platform::shell_open(&l.url());
+                }
+                let (reply_text, reply_color) = crate::ui::ports::reply_text(reply);
+                let mut job = egui::text::LayoutJob::default();
+                job.append(&l.addrs_text(), 0.0, egui::TextFormat::simple(theme::regular(12.0), INK_3));
+                if reply.is_some() {
+                    job.append(&reply_text, 8.0, egui::TextFormat::simple(theme::regular(12.0), reply_color));
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(job).truncate());
+                });
+            });
+        });
+    }
+    if listening.len() > MAX {
+        ui.label(RichText::new(format!("e mais {}", listening.len() - MAX)).color(INK_3).font(theme::regular(12.0)));
+    }
 }
 
 fn path_row(ui: &mut Ui, label: &str, value: Option<String>, explore: Option<&std::path::Path>) {

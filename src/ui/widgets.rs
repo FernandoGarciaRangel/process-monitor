@@ -1,12 +1,12 @@
 //! Peças visuais reaproveitadas pelas telas.
 
 use egui::{
-    Align2, Color32, CornerRadius, Frame, Margin, Mesh, Pos2, Rect, Response, RichText, Sense, Shape,
-    Stroke, TextureHandle, Ui, Vec2, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, Frame, Key, Layout, Margin, Mesh, Pos2, Rect, Response, RichText, Sense,
+    Shape, Stroke, TextureHandle, Ui, Vec2, pos2, vec2,
 };
 
 use crate::sampler::{HISTORY_LEN, Series};
-use crate::theme::{self, GRAPHITE_1, HAIRLINE, INK, INK_2, INK_3, INK_4, R_MD, R_SM};
+use crate::theme::{self, GRAPHITE_1, HAIRLINE, INK, INK_2, INK_3, INK_4, R_MD, R_SM, WELL};
 
 /// Uma série num gráfico. `fill` pinta a área com degradê; sem ele, só a linha.
 pub struct Layer<'a> {
@@ -230,6 +230,52 @@ pub fn icon_button(ui: &mut Ui, icon: &str, tooltip: &str) -> Response {
             .min_size(vec2(26.0, 26.0)),
     )
     .on_hover_text(tooltip)
+}
+
+/// Campo de busca com lupa e botão de limpar. Ctrl+F foca o campo e Esc limpa.
+pub fn search_box(ui: &mut Ui, text: &mut String, id_salt: &str, hint: &str, tooltip: &str) {
+    // Desconta a margem interna (2 × 10): sem isso, com pouco espaço, o campo invadia o
+    // título à esquerda.
+    let width = (ui.available_width() - 28.0).clamp(160.0, 340.0);
+    Frame::NONE
+        .fill(WELL)
+        .stroke(Stroke::new(1.0, HAIRLINE))
+        .corner_radius(CornerRadius::same(R_SM))
+        .inner_margin(Margin::symmetric(10, 0))
+        .show(ui, |ui| {
+            ui.set_width(width);
+            // Esquerda para a direita explícito: `horizontal` herdaria a direção da barra,
+            // que é montada da direita para a esquerda, e a lupa e o × trocariam de lado.
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                ui.set_height(30.0);
+                ui.label(RichText::new(egui_phosphor::regular::MAGNIFYING_GLASS).font(theme::regular(14.0)).color(INK_3));
+                let clear_width = if text.is_empty() { 0.0 } else { 26.0 };
+                let edit = egui::TextEdit::singleline(text)
+                    .id_salt(id_salt)
+                    .hint_text(RichText::new(hint).color(INK_4))
+                    .frame(Frame::NONE)
+                    .font(theme::regular(13.0))
+                    .desired_width(ui.available_width() - clear_width);
+                let response = ui.add(edit);
+                if ui.input(|i| i.modifiers.command && i.key_pressed(Key::F)) {
+                    response.request_focus();
+                }
+                if response.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                    text.clear();
+                }
+                if !text.is_empty() && icon_button(ui, egui_phosphor::regular::X, "Limpar busca").clicked() {
+                    text.clear();
+                }
+            });
+        })
+        .response
+        .on_hover_text(tooltip);
+}
+
+/// Texto alinhado à direita na célula, como os números da tabela.
+pub fn right_text(ui: &mut Ui, text: &str, color: Color32) {
+    let rect = ui.max_rect();
+    ui.painter().text(pos2(rect.right() - 10.0, rect.center().y), Align2::RIGHT_CENTER, text, theme::regular(12.5), color);
 }
 
 /// Pinta o fundo de calor no retângulo da célula e escreve o valor alinhado à direita.

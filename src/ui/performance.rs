@@ -15,7 +15,7 @@ pub fn show(app: &mut App, ui: &mut Ui, s: &Snapshot, view: View) {
         View::Disk => disk(ui, s),
         View::Network => network(ui, s),
         View::Gpu(i) => gpu(app, ui, s, i),
-        View::Processes => {}
+        View::Processes | View::Ports => {}
     });
 }
 

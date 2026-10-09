@@ -15,6 +15,7 @@ use sysinfo::{
 
 use crate::gpu::GpuMonitor;
 use crate::platform;
+use crate::ports::{self, Listener};
 
 /// Pontos guardados em cada série. Com 1 s de intervalo, um minuto de histórico.
 pub const HISTORY_LEN: usize = 60;
@@ -163,6 +164,8 @@ pub struct Snapshot {
 
     pub gpus: Vec<GpuInfo>,
     pub processes: Vec<ProcInfo>,
+    /// Portas TCP em escuta, lidas no mesmo instante que os processos.
+    pub listeners: Vec<Listener>,
     pub history: History,
 }
 
@@ -446,6 +449,7 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Option<Arc<Snapshot>>>>, rx: Receiv
             net_adapters: active.into_iter().take(4).map(|(n, _)| n).collect(),
             gpus,
             processes,
+            listeners: ports::listeners(),
             history: history.clone(),
         };
 
