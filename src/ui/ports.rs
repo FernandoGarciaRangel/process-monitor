@@ -90,7 +90,7 @@ impl Col {
             Col::Address => "Endereço",
             Col::Pid => "PID",
             Col::Response => "Resposta",
-            Col::Latency => "Últimos 2 min",
+            Col::Latency => "Conexão · 2 min",
             Col::Memory => "Memória",
             Col::Uptime => "Ativo há",
         }
@@ -114,14 +114,15 @@ impl Col {
 
     fn column(self) -> Column {
         match self {
-            Col::Port => Column::exact(76.0),
-            Col::Name => Column::remainder().at_least(200.0).clip(true),
-            Col::Address => Column::exact(120.0).clip(true),
-            Col::Pid => Column::exact(64.0),
-            Col::Response => Column::exact(118.0).clip(true),
-            Col::Latency => Column::exact(92.0),
-            Col::Memory => Column::exact(88.0),
-            Col::Uptime => Column::exact(88.0),
+            Col::Port => Column::initial(76.0).at_least(64.0).clip(true),
+            // Nome não tem divisória própria: absorve o que as outras ganham ou perdem.
+            Col::Name => Column::remainder().at_least(200.0).clip(true).resizable(false),
+            Col::Address => Column::initial(120.0).at_least(60.0).clip(true),
+            Col::Pid => Column::initial(64.0).at_least(48.0).clip(true),
+            Col::Response => Column::initial(118.0).at_least(70.0).clip(true),
+            Col::Latency => Column::initial(92.0).at_least(60.0).clip(true),
+            Col::Memory => Column::initial(88.0).at_least(64.0).clip(true),
+            Col::Uptime => Column::initial(88.0).at_least(64.0).clip(true),
         }
     }
 }
@@ -426,7 +427,7 @@ fn table(app: &mut App, ui: &mut Ui, snap: &Snapshot, rows: &[Row], actions: &mu
     let mut builder = TableBuilder::new(ui)
         .id_salt("ports")
         .striped(false)
-        .resizable(false)
+        .resizable(true)
         .sense(Sense::click())
         .cell_layout(Layout::left_to_right(Align::Center))
         .min_scrolled_height(0.0)

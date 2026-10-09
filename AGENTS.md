@@ -123,6 +123,10 @@ detalhes de um processo com porta) aberta.
   paginada e demora na primeira resposta. Com 1,5 s ele aparecia como calado.
 - Python só é sondado com indício de servidor web na linha de comando: kernel do
   Jupyter e `debugpy` escutam portas que não falam HTTP.
+- 🔴 Não mande GET a cada rodada. uvicorn, Flask, Django e o Next registram toda
+  requisição, e o terminal do servidor do usuário enchia de `GET / 404` a cada 2 s.
+  A rodada de 2 s só abre e fecha a conexão TCP (`check`); o GET completo roda na
+  primeira vez, quando a porta volta depois de cair e a cada `FULL_INTERVAL` (30 s).
 
 ## Windows em português
 

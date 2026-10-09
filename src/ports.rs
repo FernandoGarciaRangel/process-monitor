@@ -30,7 +30,11 @@ pub const DEFAULT_RANGES: &str = "5173-5183, 8000-8010";
 /// Uma faixa vira uma linha de chips na tela; mais que isso não cabe nem ajuda.
 const MAX_RANGE_LEN: u16 = 64;
 
+/// A cada rodada só se abre e fecha a conexão TCP: diz se o servidor está de pé sem
+/// aparecer no log dele. O GET completo, que o uvicorn, o Flask e o Next registram
+/// linha a linha, fica para a primeira vez e a cada [`FULL_INTERVAL`].
 const ROUND_INTERVAL: Duration = Duration::from_secs(2);
+const FULL_INTERVAL: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 /// Folgado de propósito: um servidor parado há dias tem a memória paginada para o disco
 /// e leva alguns segundos na primeira resposta. Com 1,5 s ele aparecia como calado.
@@ -329,11 +333,13 @@ impl Reply {
 #[derive(Clone, Debug, Default)]
 pub struct PortStatus {
     pub reply: Option<Reply>,
-    /// Tempo de resposta nas últimas rodadas (0 quando não respondeu).
+    /// Tempo de conexão TCP nas últimas rodadas (0 quando não conectou).
     pub latency: Series,
     page_title: Option<String>,
     api_title: Option<String>,
     api_checked: bool,
+    /// Quando foi o último GET completo.
+    last_full: Option<Instant>,
 }
 
 impl PortStatus {
@@ -343,19 +349,28 @@ impl PortStatus {
     }
 
     fn apply(&mut self, probe: Probe) {
-        self.latency.push(match probe.reply {
-            Reply::Http { ms, .. } => ms,
-            _ => 0.0,
-        });
+        self.latency.push(probe.connect_ms.unwrap_or(0.0));
+        if probe.full {
+            self.last_full = Some(Instant::now());
+        }
+        // `None`: só conectou e o servidor segue de pé; vale a última resposta HTTP.
+        let Some(reply) = probe.reply else { return };
         // Fora do ar, o título anterior continua: ainda é o que a porta servia.
-        if matches!(probe.reply, Reply::Http { .. }) {
+        if matches!(reply, Reply::Http { .. }) {
             self.page_title = probe.page_title;
         }
         if let Some(api) = probe.api_title {
             self.api_checked = true;
             self.api_title = api;
         }
-        self.reply = Some(probe.reply);
+        self.reply = Some(reply);
+    }
+
+    /// Vale um GET completo: porta nova, que voltou depois de cair, ou já se passou
+    /// [`FULL_INTERVAL`] desde o último.
+    fn wants_full(&self) -> bool {
+        let up = matches!(self.reply, Some(Reply::Http { .. } | Reply::NotHttp));
+        !up || self.last_full.is_none_or(|t| t.elapsed() >= FULL_INTERVAL)
     }
 }
 
@@ -452,10 +467,20 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Arc<Statuses>>>, rx: Receiver<Msg>)
 }
 
 struct Probe {
-    reply: Reply,
+    /// `None` numa rodada só de conexão que deu certo: nada novo sobre o HTTP.
+    reply: Option<Reply>,
+    connect_ms: Option<f32>,
+    /// Foi um GET completo (conta para o intervalo de [`FULL_INTERVAL`]).
+    full: bool,
     page_title: Option<String>,
     /// `Some` quando o OpenAPI foi consultado nesta rodada (achando título ou não).
     api_title: Option<Option<String>>,
+}
+
+impl Probe {
+    fn failed(reply: Reply) -> Self {
+        Self { reply: Some(reply), connect_ms: None, full: false, page_title: None, api_title: None }
+    }
 }
 
 /// Todas em paralelo: uma porta calada não pode segurar as outras até o timeout.
@@ -464,15 +489,22 @@ fn probe_all(targets: &[Target], statuses: &Statuses) -> Vec<Probe> {
         let handles: Vec<_> = targets
             .iter()
             .map(|t| {
-                let want_api = t.api && statuses.get(&(t.port, t.pid)).is_none_or(|s| !s.api_checked);
-                scope.spawn(move || probe(t, want_api))
+                let status = statuses.get(&(t.port, t.pid));
+                let full = status.is_none_or(PortStatus::wants_full);
+                let want_api = t.api && status.is_none_or(|s| !s.api_checked);
+                scope.spawn(move || if full { probe(t, want_api) } else { check(t) })
             })
             .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or(Probe { reply: Reply::NotHttp, page_title: None, api_title: None }))
-            .collect()
+        handles.into_iter().map(|h| h.join().unwrap_or(Probe::failed(Reply::NotHttp))).collect()
     })
+}
+
+/// Só abre e fecha a conexão: o servidor nem chega a ver uma requisição.
+fn check(t: &Target) -> Probe {
+    match connect(t.addr) {
+        Ok((_, ms)) => Probe { reply: None, connect_ms: Some(ms), full: false, page_title: None, api_title: None },
+        Err(reply) => Probe::failed(reply),
+    }
 }
 
 fn probe(t: &Target, want_api: bool) -> Probe {
@@ -485,25 +517,39 @@ fn probe(t: &Target, want_api: bool) -> Probe {
                     .filter(|r| r.status == 200)
                     .and_then(|r| openapi_title(&String::from_utf8_lossy(&r.body)))
             });
-            Probe { reply: Reply::Http { status: page.status, ms: page.ms }, page_title, api_title }
+            Probe {
+                reply: Some(Reply::Http { status: page.status, ms: page.ms }),
+                connect_ms: Some(page.connect_ms),
+                full: true,
+                page_title,
+                api_title,
+            }
         }
-        Err(reply) => Probe { reply, page_title: None, api_title: None },
+        Err(reply) => Probe { full: true, ..Probe::failed(reply) },
     }
 }
 
 struct Response {
     status: u16,
     ms: f32,
+    connect_ms: f32,
     body: Vec<u8>,
+}
+
+/// Conexão TCP com timeout, e quanto ela levou em ms.
+fn connect(addr: SocketAddr) -> Result<(TcpStream, f32), Reply> {
+    let started = Instant::now();
+    let stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|e| match e.kind() {
+        ErrorKind::TimedOut => Reply::Timeout,
+        _ => Reply::Refused,
+    })?;
+    Ok((stream, started.elapsed().as_secs_f32() * 1000.0))
 }
 
 /// GET mínimo em HTTP/1.1, sem dependências. O tempo medido é até o primeiro byte.
 fn get(addr: SocketAddr, path: &str, limit: usize) -> Result<Response, Reply> {
     let started = Instant::now();
-    let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|e| match e.kind() {
-        ErrorKind::TimedOut => Reply::Timeout,
-        _ => Reply::Refused,
-    })?;
+    let (mut stream, connect_ms) = connect(addr)?;
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
     // `localhost` no Host: o Vite recusa nomes que não estão em `allowedHosts`.
@@ -538,7 +584,7 @@ fn get(addr: SocketAddr, path: &str, limit: usize) -> Result<Response, Reply> {
     }
     let status = parse_status(&data).ok_or(Reply::NotHttp)?;
     let body = find(&data, b"\r\n\r\n").map(|i| data[i + 4..].to_vec()).unwrap_or_default();
-    Ok(Response { status, ms: first_byte.unwrap_or_default().as_secs_f32() * 1000.0, body })
+    Ok(Response { status, ms: first_byte.unwrap_or_default().as_secs_f32() * 1000.0, connect_ms, body })
 }
 
 /// Já chegou o que interessa: o corpo inteiro (pelo `Content-Length`) ou o fim do `<title>`.
@@ -778,9 +824,43 @@ mod tests {
         let target = Target { port: addr.port(), pid: 0, addr, api: false };
         let result = probe(&target, false);
         handle.join().unwrap();
-        assert!(matches!(result.reply, Reply::Http { status: 404, .. }));
-        assert!(result.reply.healthy());
+        assert!(matches!(result.reply, Some(Reply::Http { status: 404, .. })));
+        assert!(result.reply.is_some_and(Reply::healthy));
+        assert!(result.full && result.connect_ms.is_some());
         assert_eq!(result.page_title.as_deref(), Some("Painel"));
+    }
+
+    #[test]
+    fn rodada_seguinte_so_conecta_sem_requisicao() {
+        let server = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = server.local_addr().unwrap();
+        // O servidor conta os bytes recebidos em cada conexão.
+        let handle = std::thread::spawn(move || {
+            let mut received = Vec::new();
+            for _ in 0..2 {
+                let (mut conn, _) = server.accept().unwrap();
+                let _ = conn.set_read_timeout(Some(Duration::from_millis(500)));
+                let mut buf = [0u8; 1024];
+                let n = conn.read(&mut buf).unwrap_or(0);
+                if n > 0 {
+                    let _ = conn.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                }
+                received.push(n);
+            }
+            received
+        });
+        let target = Target { port: addr.port(), pid: 0, addr, api: false };
+        let mut status = PortStatus::default();
+        assert!(status.wants_full(), "porta nova pede o GET completo");
+        status.apply(probe(&target, false));
+        assert!(!status.wants_full(), "logo depois do GET, só conexão");
+        let quick = check(&target);
+        assert!(quick.reply.is_none() && quick.connect_ms.is_some());
+        status.apply(quick);
+        assert!(matches!(status.reply, Some(Reply::Http { status: 200, .. })), "a resposta HTTP anterior continua valendo");
+        let received = handle.join().unwrap();
+        assert!(received[0] > 0, "o primeiro acesso é um GET");
+        assert_eq!(received[1], 0, "a rodada rápida não manda nada ao servidor");
     }
 
     #[test]
@@ -793,6 +873,6 @@ mod tests {
         });
         let result = probe(&Target { port: addr.port(), pid: 0, addr, api: false }, false);
         handle.join().unwrap();
-        assert_eq!(result.reply, Reply::NotHttp);
+        assert_eq!(result.reply, Some(Reply::NotHttp));
     }
 }
