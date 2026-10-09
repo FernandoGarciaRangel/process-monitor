@@ -6,7 +6,7 @@ use egui_phosphor::regular as icon;
 use crate::app::{App, View};
 use crate::format;
 use crate::sampler::Snapshot;
-use crate::theme::{self, CPU, DISK, GPU, GRAPHITE_1, GRAPHITE_2, INK, INK_2, INK_3, MEMORY, NETWORK, R_MD};
+use crate::theme::{self, ACCENT, CPU, DISK, GPU, GRAPHITE_1, GRAPHITE_2, INK, INK_2, INK_3, MEMORY, NETWORK, R_MD};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
@@ -145,9 +145,9 @@ fn logo_mark(ui: &Ui, rect: Rect) {
         pos2(r.left() + r.width() * 0.74, r.center().y - 1.0),
         pos2(r.right() - 2.0, r.center().y - 1.0),
     ];
-    p.line(pts.to_vec(), Stroke::new(1.6, CPU));
-    p.circle_filled(pts[5], 4.5, CPU.gamma_multiply(0.2));
-    p.circle_filled(pts[5], 2.0, CPU);
+    p.line(pts.to_vec(), Stroke::new(1.6, ACCENT));
+    p.circle_filled(pts[5], 4.5, ACCENT.gamma_multiply(0.2));
+    p.circle_filled(pts[5], 2.0, ACCENT);
 }
 
 fn nav_item(ui: &mut Ui, selected: bool, glyph: &str, label: &str, badge: &str) -> Response {
@@ -162,7 +162,7 @@ fn nav_item(ui: &mut Ui, selected: bool, glyph: &str, label: &str, badge: &str) 
     };
     p.rect_filled(rect, CornerRadius::same(R_MD), fill);
     if selected {
-        accent_bar(ui, rect, INK_2);
+        accent_bar(ui, rect, ACCENT);
     }
     let text_color = if selected { INK } else { INK_2 };
     p.text(pos2(rect.left() + 14.0, rect.center().y), Align2::LEFT_CENTER, glyph, theme::regular(16.0), text_color);

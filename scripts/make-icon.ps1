@@ -3,7 +3,7 @@
     Gera assets/app.png (256 px) e assets/app.ico (16 a 256 px) a partir de desenho vetorial.
 
 .DESCRIPTION
-    O ícone repete a marca da barra lateral: um traço de sinal sobre grafite,
+    O ícone repete a marca da barra lateral: um traço de sinal sobre preto,
     terminando no ponto luminoso que os gráficos do app usam para o valor atual.
     Tamanhos pequenos são redesenhados (não reduzidos) com traço mais grosso,
     senão a linha some em 16 px. Rodar de novo só se o desenho mudar.
@@ -11,9 +11,10 @@
 Add-Type -AssemblyName System.Drawing
 
 $assets = Join-Path $PSScriptRoot '..\assets' | Resolve-Path
-$graphite0 = [System.Drawing.Color]::FromArgb(255, 0x0E, 0x10, 0x13)
-$graphite2 = [System.Drawing.Color]::FromArgb(255, 0x1E, 0x23, 0x29)
-$cpu = [System.Drawing.Color]::FromArgb(255, 0x4C, 0xC2, 0xFF)
+$graphite0 = [System.Drawing.Color]::FromArgb(255, 0x05, 0x05, 0x05)
+$graphite2 = [System.Drawing.Color]::FromArgb(255, 0x1C, 0x1C, 0x1C)
+# Laranja da marca (#FA5019), o mesmo ACCENT de src/theme.rs.
+$cpu = [System.Drawing.Color]::FromArgb(255, 0xFA, 0x50, 0x19)
 
 function New-RoundedRect([float]$x, [float]$y, [float]$w, [float]$h, [float]$r) {
     $path = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -61,7 +62,7 @@ function Render([int]$size) {
         $gr = 30 * $s
         $g.FillEllipse($glow, $head.X - $gr, $head.Y - $gr, 2 * $gr, 2 * $gr)
     }
-    $dot = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 0xE8, 0xF7, 0xFF))
+    $dot = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 0xFF, 0xE8, 0xDE))
     $dr = [Math]::Max(1.5, 14 * $s)
     $g.FillEllipse($dot, $head.X - $dr, $head.Y - $dr, 2 * $dr, 2 * $dr)
 

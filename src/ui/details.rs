@@ -7,7 +7,7 @@ use crate::app::{self, App, View};
 use crate::format;
 use crate::ports::{Listener, Reply};
 use crate::sampler::ProcKey;
-use crate::theme::{self, CPU, HAIRLINE, INK, INK_2, INK_3, MEMORY, R_SM, WELL};
+use crate::theme::{self, ACCENT, CPU, HAIRLINE, INK, INK_2, INK_3, MEMORY, R_SM, WELL};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
@@ -91,7 +91,7 @@ fn body(app: &mut App, ui: &mut Ui) {
                 match &parent {
                     Some((pk, name)) => {
                         // Botão sem moldura em vez de `link`, que não corta nomes longos.
-                        let link = egui::Button::new(RichText::new(format!("{name} · {}", pk.pid)).font(theme::regular(12.5)).color(CPU))
+                        let link = egui::Button::new(RichText::new(format!("{name} · {}", pk.pid)).font(theme::regular(12.5)).color(ACCENT))
                             .frame(false)
                             .truncate();
                         if ui.add(link).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -233,7 +233,7 @@ fn ports_section(app: &mut App, ui: &mut Ui, key: ProcKey, listening: &[&Listene
     for l in listening.iter().take(MAX) {
         let reply = app.port_status.get(&(l.port, l.pid)).and_then(|s| s.reply);
         ui.horizontal(|ui| {
-            let number = egui::Button::new(RichText::new(l.port.to_string()).font(theme::semibold(13.0)).color(CPU)).frame(false);
+            let number = egui::Button::new(RichText::new(l.port.to_string()).font(theme::semibold(13.0)).color(ACCENT)).frame(false);
             if ui.add(number).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ver na tela de portas").clicked() {
                 app.view = View::Ports;
                 app.select_port(key, l.port);

@@ -1,27 +1,32 @@
 //! Tokens visuais e configuração do egui.
 //!
-//! Direção: instrumento de telemetria em grafite. As superfícies sobem poucos pontos
-//! de luminosidade a cada nível, as bordas são linhas finas translúcidas e a cor fica
-//! reservada para dado: cada recurso tem a sua, e a carga aparece como calor âmbar.
+//! Direção: instrumento de telemetria em preto. As superfícies sobem poucos pontos de
+//! luminosidade a cada nível, sem matiz, e as bordas são linhas finas translúcidas. A
+//! cor fica reservada: o laranja [`ACCENT`] marca o que é da interface (seleção, item
+//! ativo, links, marca) e a carga; cada recurso tem a sua cor nos gráficos.
 
 use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Shadow, Stroke, TextStyle};
 
-// Superfícies (grafite, do fundo para cima). O poço fica abaixo do fundo: campos recebem conteúdo.
-pub const WELL: Color32 = Color32::from_rgb(0x0A, 0x0B, 0x0D);
-pub const GRAPHITE_0: Color32 = Color32::from_rgb(0x0E, 0x10, 0x13);
-pub const GRAPHITE_1: Color32 = Color32::from_rgb(0x14, 0x17, 0x1B);
-pub const GRAPHITE_2: Color32 = Color32::from_rgb(0x1A, 0x1E, 0x23);
-pub const GRAPHITE_3: Color32 = Color32::from_rgb(0x22, 0x27, 0x2D);
+// Superfícies (preto neutro, do fundo para cima). O poço fica abaixo do fundo: campos recebem conteúdo.
+// Os nomes GRAPHITE_* ficaram da paleta anterior; o valor agora é preto sem matiz.
+pub const WELL: Color32 = Color32::from_rgb(0x05, 0x05, 0x05);
+pub const GRAPHITE_0: Color32 = Color32::from_rgb(0x0A, 0x0A, 0x0A);
+pub const GRAPHITE_1: Color32 = Color32::from_rgb(0x12, 0x12, 0x12);
+pub const GRAPHITE_2: Color32 = Color32::from_rgb(0x1A, 0x1A, 0x1A);
+pub const GRAPHITE_3: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
 
 // Linhas finas: somem quando não se procura por elas.
 pub const HAIRLINE: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18);
 pub const HAIRLINE_STRONG: Color32 = Color32::from_rgba_premultiplied(32, 32, 32, 32);
 
-// Texto em quatro níveis.
-pub const INK: Color32 = Color32::from_rgb(0xE6, 0xE8, 0xEB);
-pub const INK_2: Color32 = Color32::from_rgb(0xA8, 0xAE, 0xB7);
-pub const INK_3: Color32 = Color32::from_rgb(0x76, 0x7D, 0x87);
-pub const INK_4: Color32 = Color32::from_rgb(0x4E, 0x54, 0x5C);
+// Texto em quatro níveis, cinzas neutros como o fundo.
+pub const INK: Color32 = Color32::from_rgb(0xEC, 0xEC, 0xEC);
+pub const INK_2: Color32 = Color32::from_rgb(0xAD, 0xAD, 0xAD);
+pub const INK_3: Color32 = Color32::from_rgb(0x7A, 0x7A, 0x7A);
+pub const INK_4: Color32 = Color32::from_rgb(0x52, 0x52, 0x52);
+
+/// Laranja da marca: seleção, item ativo, links, logo e a carga nas tabelas.
+pub const ACCENT: Color32 = Color32::from_rgb(0xFA, 0x50, 0x19);
 
 // Uma cor por recurso, a mesma em toda a interface.
 pub const CPU: Color32 = Color32::from_rgb(0x4C, 0xC2, 0xFF);
@@ -30,9 +35,10 @@ pub const DISK: Color32 = Color32::from_rgb(0xA3, 0xE3, 0x5A);
 pub const NETWORK: Color32 = Color32::from_rgb(0x2D, 0xD4, 0xBF);
 pub const GPU: Color32 = Color32::from_rgb(0xFF, 0x7E, 0xB6);
 
-/// Calor: quanto mais carga, mais âmbar.
-pub const HEAT: Color32 = Color32::from_rgb(0xFF, 0xB3, 0x47);
-pub const DANGER: Color32 = Color32::from_rgb(0xF2, 0x54, 0x5B);
+/// Calor: quanto mais carga, mais laranja.
+pub const HEAT: Color32 = ACCENT;
+/// Vermelho puxado para o carmim, para não se confundir com o laranja do acento.
+pub const DANGER: Color32 = Color32::from_rgb(0xE5, 0x38, 0x4F);
 pub const OK: Color32 = Color32::from_rgb(0x7B, 0xD8, 0x8F);
 
 pub const R_SM: u8 = 6;
@@ -90,9 +96,9 @@ pub fn apply(ctx: &egui::Context) {
         v.code_bg_color = WELL;
         v.warn_fg_color = HEAT;
         v.error_fg_color = DANGER;
-        v.hyperlink_color = CPU;
-        v.selection.bg_fill = CPU.gamma_multiply(0.18);
-        v.selection.stroke = Stroke::new(1.0, CPU);
+        v.hyperlink_color = ACCENT;
+        v.selection.bg_fill = ACCENT.gamma_multiply(0.16);
+        v.selection.stroke = Stroke::new(1.0, ACCENT);
         v.striped = false;
 
         let w = &mut v.widgets;
@@ -181,9 +187,9 @@ pub fn heat_fill(intensity: f32) -> Color32 {
         return Color32::TRANSPARENT;
     }
     // Linear e começando baixo: cargas pequenas mal aparecem, só as grandes chamam atenção.
-    let alpha = 0.04 + 0.44 * t;
-    let color = if t > 0.75 { lerp(HEAT, DANGER, (t - 0.75) / 0.25) } else { HEAT };
-    color.gamma_multiply(alpha)
+    // Só laranja, sem virar vermelho no alto: vermelho é perigo (finalizar, erro HTTP),
+    // e uma célula de memória cheia não é um erro.
+    HEAT.gamma_multiply(0.05 + 0.50 * t)
 }
 
 pub fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {

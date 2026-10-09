@@ -135,9 +135,12 @@ de arquivo vêm traduzidas. Testes não podem supor nomes em inglês.
 
 # Visual
 
-- Tokens em `src/theme.rs`: superfícies grafite que sobem poucos pontos por nível,
-  bordas em linhas finas translúcidas, uma cor por recurso (CPU, memória, disco,
-  rede, GPU). Carga é sempre calor âmbar (`theme::heat_fill`), em qualquer coluna.
+- Cores do Fernando: **preto e laranja #FA5019**. Tokens em `src/theme.rs`:
+  superfícies pretas sem matiz que sobem poucos pontos por nível, bordas em linhas
+  finas translúcidas. O laranja (`theme::ACCENT`) marca a interface (seleção, item
+  ativo, links, logo e ícone do app) e a carga (`theme::heat_fill`), em qualquer
+  coluna. Cada recurso (CPU, memória, disco, rede, GPU) mantém a sua cor nos
+  gráficos. `DANGER` é carmim, para não se confundir com o laranja.
 - Assinatura: o ponto luminoso na ponta de todo gráfico (valor mais recente), que
   se repete no logo.
 - Fontes do próprio Windows (Segoe UI, Segoe UI Semibold, Cascadia Mono) e ícones
