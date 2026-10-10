@@ -274,6 +274,20 @@ fn toolbar(app: &mut App, ui: &mut Ui, snap: &Snapshot, visible: usize) {
                 app.group = !app.group;
             }
 
+            let locks_button = egui::Button::new(
+                RichText::new(format!("{}  Arquivo em uso", icon::FILE_LOCK)).font(theme::regular(13.0)).color(INK_2),
+            )
+            .fill(egui::Color32::TRANSPARENT)
+            .corner_radius(CornerRadius::same(R_SM))
+            .min_size(vec2(0.0, 32.0));
+            if ui
+                .add(locks_button)
+                .on_hover_text("Quem está usando um arquivo ou pasta. Também dá para soltar arquivos na janela.")
+                .clicked()
+            {
+                app.locks.open = true;
+            }
+
             ui.add_space(4.0);
             widgets::search_box(
                 ui,

@@ -5,6 +5,7 @@ mod app;
 mod format;
 mod gpu;
 mod icons;
+mod locks;
 mod platform;
 mod ports;
 mod sampler;

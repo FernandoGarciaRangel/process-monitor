@@ -420,8 +420,12 @@ unsafe fn creation_time(handle: HANDLE) -> Option<u64> {
     let (mut created, mut exit, mut kernel, mut user) =
         (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
     unsafe { GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user).ok()? };
-    let ticks = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
-    // FILETIME conta intervalos de 100 ns desde 1601-01-01.
+    filetime_to_unix(created)
+}
+
+/// FILETIME (intervalos de 100 ns desde 1601-01-01) em segundos Unix.
+pub fn filetime_to_unix(time: FILETIME) -> Option<u64> {
+    let ticks = ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64;
     const UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
     ticks.checked_sub(UNIX_EPOCH_TICKS).map(|t| t / 10_000_000)
 }

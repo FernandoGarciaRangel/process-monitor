@@ -239,6 +239,8 @@ pub struct App {
     pub confirm: Option<KillRequest>,
     pub toasts: Vec<Toast>,
     pub icons: IconCache,
+    /// Janela "Quem está usando".
+    pub locks: ui::locks::State,
     pub elevated: bool,
     pub interval_ms: u64,
     protected_cache: HashMap<ProcKey, bool>,
@@ -361,6 +363,7 @@ impl App {
             confirm: None,
             toasts: Vec::new(),
             icons: IconCache::new(cc.egui_ctx.clone()),
+            locks: ui::locks::State::new(cc.egui_ctx.clone()),
             elevated: platform::is_elevated(),
             interval_ms,
             protected_cache: HashMap::new(),
@@ -679,6 +682,10 @@ impl App {
                 self.select(None);
             }
             self.sampler.refresh_now();
+            // Quem estava usando o arquivo pode ter sido finalizado: a lista é refeita.
+            if self.locks.open {
+                self.locks.check_after(Duration::from_millis(400));
+            }
         }
     }
 
@@ -896,8 +903,16 @@ impl eframe::App for App {
         if self.settings_open {
             ui::settings::show(self, &ctx);
         }
+        let dropped: Vec<std::path::PathBuf> =
+            ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        if !dropped.is_empty() {
+            self.locks.open_with(&dropped);
+        }
+        ui::locks::show(self, &ctx);
+        // Depois da janela de arquivos: a confirmação de finalizar abre por cima dela.
         self.confirm_modal(&ctx);
         self.toasts_ui(&ctx);
+        ui::locks::drop_overlay(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

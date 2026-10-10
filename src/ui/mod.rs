@@ -1,5 +1,6 @@
 pub mod columns;
 pub mod details;
+pub mod locks;
 pub mod performance;
 pub mod ports;
 pub mod processes;
