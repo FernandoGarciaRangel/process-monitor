@@ -400,31 +400,36 @@ fn ranges_editor(app: &mut App, ui: &mut Ui) {
                     .color(INK_3),
             );
             ui.add_space(6.0);
-            let mut text = app.port_ranges_text.clone();
-            let edit = egui::TextEdit::singleline(&mut text)
-                .hint_text(ports::DEFAULT_RANGES)
-                .font(theme::mono(12.5))
-                .desired_width(f32::INFINITY);
-            if ui.add(edit).changed() {
-                let _ = app.set_port_ranges(text);
-            }
-            match ports::parse_ranges(&app.port_ranges_text) {
-                Err(e) => {
-                    ui.label(RichText::new(e).font(theme::regular(12.0)).color(theme::DANGER));
-                }
-                Ok(_) => {
-                    ui.label(
-                        RichText::new("Ex.: 5173-5183, 8000-8010, 3000. Até 64 portas por faixa.")
-                            .font(theme::regular(12.0))
-                            .color(INK_4),
-                    );
-                }
-            }
-            ui.add_space(4.0);
-            if app.port_ranges_text != ports::DEFAULT_RANGES && widgets::ghost_button(ui, "Restaurar padrão").clicked() {
-                let _ = app.set_port_ranges(ports::DEFAULT_RANGES.to_owned());
-            }
+            ranges_field(app, ui);
         });
+}
+
+/// Campo das faixas com a validação embaixo; também nas configurações.
+pub fn ranges_field(app: &mut App, ui: &mut Ui) {
+    let mut text = app.port_ranges_text.clone();
+    let edit = egui::TextEdit::singleline(&mut text)
+        .hint_text(ports::DEFAULT_RANGES)
+        .font(theme::mono(12.5))
+        .desired_width(f32::INFINITY);
+    if ui.add(edit).changed() {
+        let _ = app.set_port_ranges(text);
+    }
+    match ports::parse_ranges(&app.port_ranges_text) {
+        Err(e) => {
+            ui.label(RichText::new(e).font(theme::regular(12.0)).color(theme::DANGER));
+        }
+        Ok(_) => {
+            ui.label(
+                RichText::new("Ex.: 5173-5183, 8000-8010, 3000. Até 64 portas por faixa.")
+                    .font(theme::regular(12.0))
+                    .color(INK_4),
+            );
+        }
+    }
+    ui.add_space(4.0);
+    if app.port_ranges_text != ports::DEFAULT_RANGES && widgets::ghost_button(ui, "Restaurar padrão").clicked() {
+        let _ = app.set_port_ranges(ports::DEFAULT_RANGES.to_owned());
+    }
 }
 
 fn table(app: &mut App, ui: &mut Ui, snap: &Snapshot, rows: &[Row], actions: &mut Vec<Action>) {
@@ -440,6 +445,12 @@ fn table(app: &mut App, ui: &mut Ui, snap: &Snapshot, rows: &[Row], actions: &mu
     cols.push(Col::Memory);
     if width > 880.0 {
         cols.push(Col::Uptime);
+    }
+    // Porta e nome ficam sempre: são a linha.
+    cols.retain(|&c| matches!(c, Col::Port | Col::Name) || app.column_visible("ports", c.key()));
+    // Sem sondagem HTTP, as colunas de resposta só teriam traços.
+    if !app.probe_http {
+        cols.retain(|&c| !matches!(c, Col::Response | Col::Latency));
     }
 
     let scroll_row = if app.scroll_to_port {

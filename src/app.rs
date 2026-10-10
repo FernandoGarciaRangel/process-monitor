@@ -1,6 +1,6 @@
 //! Estado do aplicativo e montagem da janela: barra lateral, conteúdo e detalhes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,7 @@ use crate::ports::{self, Kind, PortRange, Prober, Statuses, Target};
 use crate::sampler::{ProcInfo, ProcKey, Sampler, Series, Snapshot};
 use crate::theme::{self, GRAPHITE_0, GRAPHITE_3, HAIRLINE, HAIRLINE_STRONG, INK, INK_2, INK_3, R_LG, R_MD};
 use crate::ui;
+use crate::tray::Tray;
 use crate::ui::widgets;
 use crate::updater::{self, Updater};
 
@@ -185,6 +186,38 @@ impl HistorySpan {
     }
 }
 
+/// Quanto tempo os gráficos de desempenho mostram.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryWindow {
+    One,
+    Five,
+    Fifteen,
+}
+
+impl HistoryWindow {
+    pub const ALL: [HistoryWindow; 3] = [HistoryWindow::One, HistoryWindow::Five, HistoryWindow::Fifteen];
+
+    pub fn minutes(self) -> u64 {
+        match self {
+            HistoryWindow::One => 1,
+            HistoryWindow::Five => 5,
+            HistoryWindow::Fifteen => 15,
+        }
+    }
+
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(self.minutes() * 60)
+    }
+
+    pub fn label(self) -> String {
+        format!("{} min", self.minutes())
+    }
+
+    fn from_minutes(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|w| w.minutes().to_string() == text)
+    }
+}
+
 pub struct App {
     pub sampler: Sampler,
     pub snap: Option<Arc<Snapshot>>,
@@ -235,6 +268,24 @@ pub struct App {
     /// O aviso de versão pronta foi dispensado nesta execução (continua nas configurações).
     pub update_dismissed: bool,
     pub settings_open: bool,
+
+    pub tray: Tray,
+    /// O X esconde na bandeja; sair de verdade só pelo menu do ícone.
+    pub minimize_to_tray: bool,
+    /// O balão "continua na bandeja" já apareceu uma vez.
+    tray_hint_shown: bool,
+    pub always_on_top: bool,
+    /// Com a opção desligada, a tela de portas não manda nenhuma requisição.
+    pub probe_http: bool,
+    /// Colunas escondidas, como `tabela.coluna` (`processes.pid`, `ports.address`).
+    pub hidden_columns: BTreeSet<String>,
+    pub history_window: HistoryWindow,
+    /// Entrada de inicialização do Windows: (ligada, abre minimizado). Lida do registro.
+    pub autostart: (bool, bool),
+    /// Aberto pela inicialização do Windows com `--minimized`: some depois do 1º quadro.
+    start_minimized: bool,
+    /// Fechar de verdade (Sair, instalador, atualização, reinício como administrador).
+    quitting: bool,
 }
 
 const INTERVAL_KEY: &str = "interval_ms";
@@ -248,9 +299,18 @@ const SORT_KEY: &str = "sort";
 const SORT_DESC_KEY: &str = "sort_desc";
 const PORT_SORT_KEY: &str = "port_sort";
 const PORT_SORT_DESC_KEY: &str = "port_sort_desc";
+const TRAY_KEY: &str = "minimize_to_tray";
+const TRAY_HINT_KEY: &str = "tray_hint_shown";
+const ON_TOP_KEY: &str = "always_on_top";
+const PROBE_HTTP_KEY: &str = "probe_http";
+const HIDDEN_COLUMNS_KEY: &str = "hidden_columns";
+const HISTORY_WINDOW_KEY: &str = "history_window";
+
+/// Tabelas com largura de coluna salva (ver `ui::columns`).
+pub const TABLES: [&str; 2] = ["processes", "ports"];
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, start_minimized: bool) -> Self {
         theme::apply(&cc.egui_ctx);
         let stored = |key: &str| cc.storage.and_then(|s| s.get_string(key));
         let interval_ms = stored(INTERVAL_KEY)
@@ -269,8 +329,18 @@ impl App {
         let sort = stored(SORT_KEY).and_then(|v| SortKey::ALL.into_iter().find(|k| k.key() == v)).unwrap_or(SortKey::Cpu);
         let port_sort =
             stored(PORT_SORT_KEY).and_then(|v| PortSort::ALL.into_iter().find(|k| k.key() == v)).unwrap_or(PortSort::Port);
+        let minimize_to_tray = stored(TRAY_KEY).is_none_or(|v| v == "1");
+        let history_window =
+            stored(HISTORY_WINDOW_KEY).and_then(|v| HistoryWindow::from_minutes(&v)).unwrap_or(HistoryWindow::One);
+        let hidden_columns = stored(HIDDEN_COLUMNS_KEY)
+            .map(|v| v.split(',').filter(|c| !c.is_empty()).map(str::to_owned).collect())
+            .unwrap_or_default();
         Self {
-            sampler: Sampler::spawn(cc.egui_ctx.clone(), Duration::from_millis(interval_ms)),
+            sampler: Sampler::spawn(
+                cc.egui_ctx.clone(),
+                Duration::from_millis(interval_ms),
+                history_window.duration(),
+            ),
             snap: None,
             view,
             search: String::new(),
@@ -312,6 +382,124 @@ impl App {
             auto_update,
             update_dismissed: false,
             settings_open: false,
+            tray: Tray::spawn(cc.egui_ctx.clone(), minimize_to_tray),
+            minimize_to_tray,
+            tray_hint_shown: stored(TRAY_HINT_KEY).is_some_and(|v| v == "1"),
+            always_on_top: stored(ON_TOP_KEY).is_some_and(|v| v == "1"),
+            probe_http: stored(PROBE_HTTP_KEY).is_none_or(|v| v == "1"),
+            hidden_columns,
+            history_window,
+            autostart: read_autostart(),
+            start_minimized,
+            quitting: false,
+        }
+    }
+
+    pub fn set_minimize_to_tray(&mut self, on: bool) {
+        self.minimize_to_tray = on;
+        self.tray.set_icon(on);
+    }
+
+    pub fn set_always_on_top(&mut self, ctx: &egui::Context, on: bool) {
+        self.always_on_top = on;
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(window_level(on)));
+    }
+
+    pub fn set_history_window(&mut self, window: HistoryWindow) {
+        self.history_window = window;
+        self.sampler.set_history_window(window.duration());
+    }
+
+    /// Grava no registro; o estado mostrado é sempre o que ficou lá.
+    pub fn set_autostart(&mut self, enabled: bool, minimized: bool) {
+        if let Err(e) = platform::set_autostart(enabled, minimized) {
+            self.toast(format!("Não alterou a inicialização com o Windows: {e}"), ToastKind::Error, false);
+        }
+        self.autostart = read_autostart();
+    }
+
+    pub fn column_visible(&self, table: &str, column: &str) -> bool {
+        !self.hidden_columns.contains(&format!("{table}.{column}"))
+    }
+
+    pub fn set_column_visible(&mut self, table: &str, column: &str, visible: bool) {
+        let key = format!("{table}.{column}");
+        if visible {
+            self.hidden_columns.remove(&key);
+        } else {
+            self.hidden_columns.insert(key);
+        }
+    }
+
+    /// Volta todas as opções ao padrão, inclusive a inicialização com o Windows e as
+    /// larguras de coluna. A atualização em andamento não é afetada.
+    pub fn reset_settings(&mut self, ctx: &egui::Context) {
+        self.set_interval(1000);
+        self.group = false;
+        let _ = self.set_port_ranges(ports::DEFAULT_RANGES.to_owned());
+        self.ports_all = false;
+        self.probe_http = true;
+        self.set_auto_update(true);
+        self.view = View::Processes;
+        self.history_span = HistorySpan::TenMinutes;
+        self.sort = SortKey::Cpu;
+        self.sort_desc = true;
+        self.port_sort = PortSort::Port;
+        self.port_sort_desc = false;
+        self.set_minimize_to_tray(true);
+        self.set_always_on_top(ctx, false);
+        self.hidden_columns.clear();
+        self.set_history_window(HistoryWindow::One);
+        self.set_autostart(false, false);
+        for table in TABLES {
+            ui::columns::reset_widths(ctx, table);
+        }
+        self.toast("Configurações redefinidas".to_owned(), ToastKind::Ok, false);
+    }
+
+    /// Fecha de verdade, sem cair na bandeja.
+    pub fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    /// Janela, bandeja e o pedido de fechar. Roda também com a janela escondida.
+    fn window_logic(&mut self, ctx: &egui::Context) {
+        if ctx.cumulative_frame_nr() == 0 && self.always_on_top {
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(window_level(true)));
+        }
+        // O eframe mostra a janela depois do primeiro quadro; só então dá para escondê-la.
+        if self.start_minimized {
+            if ctx.cumulative_frame_nr() >= 1 {
+                self.start_minimized = false;
+                let command = if self.minimize_to_tray {
+                    egui::ViewportCommand::Visible(false)
+                } else {
+                    egui::ViewportCommand::Minimized(true)
+                };
+                ctx.send_viewport_cmd(command);
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        if self.tray.take_show() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if self.tray.quit_requested() && !self.quitting {
+            self.quit(ctx);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.minimize_to_tray && !self.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            if !self.tray_hint_shown {
+                self.tray_hint_shown = true;
+                self.tray.notifier().notify(
+                    "O Process Monitor continua aberto",
+                    "Ele fica no ícone da bandeja. Para fechar de vez, clique com o botão direito no ícone e escolha Sair.",
+                );
+            }
         }
     }
 
@@ -329,7 +517,7 @@ impl App {
     pub fn install_update(&mut self, ctx: &egui::Context) {
         let updater::State::Ready { installer, .. } = &*self.update_state else { return };
         match updater::install(installer) {
-            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Ok(()) => self.quit(ctx),
             Err(e) => self.toast(format!("Não abriu o instalador: {e}"), ToastKind::Error, false),
         }
     }
@@ -504,7 +692,7 @@ impl App {
 
     pub fn relaunch_elevated(&mut self, ctx: &egui::Context) {
         match platform::relaunch_as_admin() {
-            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Ok(()) => self.quit(ctx),
             Err(e) => self.toast(format!("Não reiniciou como administrador: {e}"), ToastKind::Error, false),
         }
     }
@@ -637,6 +825,7 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.window_logic(ctx);
         if let Some(latest) = self.sampler.latest()
             && self.snap.as_ref().is_none_or(|s| s.seq != latest.seq)
         {
@@ -660,11 +849,13 @@ impl eframe::App for App {
             s.listeners.iter().any(|l| l.pid == k.pid)
         });
         let ports_visible = self.view == View::Ports || (self.view == View::Processes && selected_listens);
-        if ports_visible != self.prober_active {
-            self.prober_active = ports_visible;
-            self.prober.set_active(ports_visible);
+        let probe = ports_visible && self.probe_http;
+        if probe != self.prober_active {
+            self.prober_active = probe;
+            self.prober.set_active(probe);
         }
-        self.port_status = self.prober.latest();
+        // Sem sondagem, nada de mostrar a última resposta como se fosse atual.
+        self.port_status = if self.probe_http { self.prober.latest() } else { Arc::default() };
         self.update_state = self.updater.latest();
         self.icons.poll(ctx);
     }
@@ -724,6 +915,12 @@ impl eframe::App for App {
         storage.set_string(SORT_DESC_KEY, if self.sort_desc { "1" } else { "0" }.to_owned());
         storage.set_string(PORT_SORT_KEY, self.port_sort.key().to_owned());
         storage.set_string(PORT_SORT_DESC_KEY, if self.port_sort_desc { "1" } else { "0" }.to_owned());
+        storage.set_string(TRAY_KEY, if self.minimize_to_tray { "1" } else { "0" }.to_owned());
+        storage.set_string(TRAY_HINT_KEY, if self.tray_hint_shown { "1" } else { "0" }.to_owned());
+        storage.set_string(ON_TOP_KEY, if self.always_on_top { "1" } else { "0" }.to_owned());
+        storage.set_string(PROBE_HTTP_KEY, if self.probe_http { "1" } else { "0" }.to_owned());
+        storage.set_string(HIDDEN_COLUMNS_KEY, self.hidden_columns.iter().cloned().collect::<Vec<_>>().join(","));
+        storage.set_string(HISTORY_WINDOW_KEY, self.history_window.minutes().to_string());
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -768,6 +965,17 @@ fn update_notice(ui: &mut egui::Ui, version: updater::Version) -> Option<bool> {
             });
         });
     choice
+}
+
+fn read_autostart() -> (bool, bool) {
+    match platform::autostart_command() {
+        Some(cmd) => (true, cmd.contains(platform::MINIMIZED_ARG)),
+        None => (false, false),
+    }
+}
+
+fn window_level(on_top: bool) -> egui::WindowLevel {
+    if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal }
 }
 
 fn loading(ui: &mut egui::Ui) {

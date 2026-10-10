@@ -66,6 +66,14 @@ impl Series {
         self.values.iter().copied().fold(0.0, f32::max)
     }
 
+    /// Muda a capacidade guardando os pontos mais recentes.
+    pub fn resize(&mut self, cap: usize) {
+        self.cap = cap.max(2);
+        while self.values.len() > self.cap {
+            self.values.pop_front();
+        }
+    }
+
     /// Os últimos `n` pontos, como uma série de capacidade `n`.
     pub fn tail(&self, n: usize) -> Series {
         let mut tail = Series::with_capacity(n);
@@ -151,7 +159,7 @@ pub struct GpuInfo {
     pub vram_total: u64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct History {
     pub cpu: Series,
     pub cores: Vec<Series>,
@@ -161,6 +169,37 @@ pub struct History {
     pub net_rx: Series,
     pub net_tx: Series,
     pub gpus: Vec<Series>,
+}
+
+impl History {
+    fn new(cap: usize) -> Self {
+        let s = || Series::with_capacity(cap);
+        Self {
+            cpu: s(),
+            cores: Vec::new(),
+            memory: s(),
+            disk_read: s(),
+            disk_write: s(),
+            net_rx: s(),
+            net_tx: s(),
+            gpus: Vec::new(),
+        }
+    }
+
+    /// Capacidade de cada série: quantas coletas cabem na janela de tempo.
+    pub fn points(window: Duration, interval: Duration) -> usize {
+        (window.as_millis() / interval.as_millis().max(1)) as usize
+    }
+
+    fn resize(&mut self, cap: usize) {
+        for s in [&mut self.cpu, &mut self.memory, &mut self.disk_read, &mut self.disk_write, &mut self.net_rx, &mut self.net_tx]
+        {
+            s.resize(cap);
+        }
+        for s in self.cores.iter_mut().chain(self.gpus.iter_mut()) {
+            s.resize(cap);
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +238,8 @@ pub struct Snapshot {
     /// As demais conexões TCP, para o painel de detalhes.
     pub connections: Vec<Connection>,
     pub history: History,
+    /// Quanto tempo as séries de `history` cobrem.
+    pub history_window: Duration,
 }
 
 impl Snapshot {
@@ -263,6 +304,7 @@ pub fn percent_of(part: u64, total: u64) -> f32 {
 enum Command {
     Refresh,
     SetInterval(Duration),
+    SetHistoryWindow(Duration),
 }
 
 pub struct Sampler {
@@ -271,13 +313,14 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    pub fn spawn(ctx: egui::Context, interval: Duration) -> Self {
+    /// `window`: quanto tempo os gráficos de desempenho mostram.
+    pub fn spawn(ctx: egui::Context, interval: Duration, window: Duration) -> Self {
         let latest = Arc::new(Mutex::new(None));
         let (tx, rx) = mpsc::channel();
         let shared = latest.clone();
         std::thread::Builder::new()
             .name("sampler".into())
-            .spawn(move || run(ctx, shared, rx, interval))
+            .spawn(move || run(ctx, shared, rx, interval, window))
             .expect("thread de coleta");
         Self { latest, tx }
     }
@@ -293,6 +336,10 @@ impl Sampler {
 
     pub fn set_interval(&self, interval: Duration) {
         let _ = self.tx.send(Command::SetInterval(interval));
+    }
+
+    pub fn set_history_window(&self, window: Duration) {
+        let _ = self.tx.send(Command::SetHistoryWindow(window));
     }
 }
 
@@ -310,7 +357,13 @@ fn process_refresh_kind() -> ProcessRefreshKind {
         .without_tasks()
 }
 
-fn run(ctx: egui::Context, latest: Arc<Mutex<Option<Arc<Snapshot>>>>, rx: Receiver<Command>, mut interval: Duration) {
+fn run(
+    ctx: egui::Context,
+    latest: Arc<Mutex<Option<Arc<Snapshot>>>>,
+    rx: Receiver<Command>,
+    mut interval: Duration,
+    window: Duration,
+) {
     let mut sys = System::new();
     let disk_kind = DiskRefreshKind::nothing().with_storage().with_io_usage();
     let mut disks = Disks::new_with_refreshed_list_specifics(disk_kind.with_kind());
@@ -319,7 +372,8 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Option<Arc<Snapshot>>>>, rx: Receiv
     let mut users: HashMap<String, Option<String>> = HashMap::new();
     // Ler a informação de versão abre o arquivo: uma vez por executável.
     let mut descriptions: HashMap<PathBuf, Option<String>> = HashMap::new();
-    let mut history = History::default();
+    let mut window = window;
+    let mut history = History::new(History::points(window, interval));
 
     let host = System::host_name().unwrap_or_default();
     let physical_cores = System::physical_core_count();
@@ -443,7 +497,8 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Option<Arc<Snapshot>>>>, rx: Receiv
         let mem_total = sys.total_memory();
         let mem_used = sys.used_memory();
         history.cpu.push(cpu);
-        history.cores.resize_with(cores.len(), Series::default);
+        let cap = history.cpu.capacity();
+        history.cores.resize_with(cores.len(), || Series::with_capacity(cap));
         for (series, value) in history.cores.iter_mut().zip(&cores) {
             series.push(*value);
         }
@@ -452,7 +507,7 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Option<Arc<Snapshot>>>>, rx: Receiv
         history.disk_write.push(disk_write as f32);
         history.net_rx.push((rx_bytes as f64 / dt) as f32);
         history.net_tx.push((tx_bytes as f64 / dt) as f32);
-        history.gpus.resize_with(gpus.len(), Series::default);
+        history.gpus.resize_with(gpus.len(), || Series::with_capacity(cap));
         for (series, g) in history.gpus.iter_mut().zip(&gpus) {
             series.push(g.utilization);
         }
@@ -484,6 +539,7 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Option<Arc<Snapshot>>>>, rx: Receiv
             listeners: ports::listeners(),
             connections: ports::connections(),
             history: history.clone(),
+            history_window: window,
         };
 
         if let Ok(mut slot) = latest.lock() {
@@ -494,9 +550,13 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Option<Arc<Snapshot>>>>, rx: Receiv
         // Espera o intervalo, mas acorda antes se a UI pedir uma coleta ou mudar o intervalo.
         match rx.recv_timeout(interval) {
             Ok(command) => {
-                if let Command::SetInterval(d) = command {
-                    interval = d;
+                match command {
+                    Command::SetInterval(d) => interval = d,
+                    Command::SetHistoryWindow(w) => window = w,
+                    Command::Refresh => {}
                 }
+                // Mesma janela de tempo com outro intervalo = outro número de pontos.
+                history.resize(History::points(window, interval));
                 // A CPU precisa de um intervalo mínimo entre leituras para não sair zerada.
                 let since = last.elapsed();
                 if since < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {

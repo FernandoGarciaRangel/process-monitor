@@ -5,7 +5,7 @@ use egui_phosphor::regular as icon;
 
 use crate::app::{App, View};
 use crate::format;
-use crate::sampler::Snapshot;
+use crate::sampler::{HISTORY_LEN, Series, Snapshot};
 use crate::theme::{self, ACCENT, CPU, DISK, GPU, GRAPHITE_1, GRAPHITE_2, INK, INK_2, INK_3, MEMORY, NETWORK, R_MD};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
@@ -48,7 +48,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 }
 
 fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
+    // Os cartões mostram sempre o último minuto; a janela escolhida vale nas telas.
+    let tail = |series: &Series| series.tail(HISTORY_LEN);
     let h = &s.history;
+    let (cpu, memory) = (tail(&h.cpu), tail(&h.memory));
+    let (disk_read, disk_write) = (tail(&h.disk_read), tail(&h.disk_write));
+    let (net_rx, net_tx) = (tail(&h.net_rx), tail(&h.net_tx));
     let cards = [
         (
             View::Cpu,
@@ -57,7 +62,7 @@ fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
             format::percent(s.cpu),
             format!("{} núcleos lógicos", s.cores.len()),
             CPU,
-            vec![Layer::area(&h.cpu, CPU)],
+            vec![Layer::area(&cpu, CPU)],
             100.0,
         ),
         (
@@ -67,7 +72,7 @@ fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
             format::percent(s.mem_percent()),
             format!("{} de {}", format::bytes(s.mem_used), format::bytes(s.mem_total)),
             MEMORY,
-            vec![Layer::area(&h.memory, MEMORY)],
+            vec![Layer::area(&memory, MEMORY)],
             100.0,
         ),
         (
@@ -77,8 +82,8 @@ fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
             format::rate(s.disk_read + s.disk_write),
             format!("L {} · E {}", format::rate(s.disk_read), format::rate(s.disk_write)),
             DISK,
-            vec![Layer::area(&h.disk_read, DISK), Layer::line(&h.disk_write, theme::lerp(DISK, Color32::WHITE, 0.45))],
-            widgets::nice_max(h.disk_read.max().max(h.disk_write.max()), 1024.0 * 1024.0),
+            vec![Layer::area(&disk_read, DISK), Layer::line(&disk_write, theme::lerp(DISK, Color32::WHITE, 0.45))],
+            widgets::nice_max(disk_read.max().max(disk_write.max()), 1024.0 * 1024.0),
         ),
         (
             View::Network,
@@ -87,8 +92,8 @@ fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
             format::rate(s.net_rx + s.net_tx),
             format!("↓ {} · ↑ {}", format::rate(s.net_rx), format::rate(s.net_tx)),
             NETWORK,
-            vec![Layer::area(&h.net_rx, NETWORK), Layer::line(&h.net_tx, theme::lerp(NETWORK, Color32::WHITE, 0.45))],
-            widgets::nice_max(h.net_rx.max().max(h.net_tx.max()), 64.0 * 1024.0),
+            vec![Layer::area(&net_rx, NETWORK), Layer::line(&net_tx, theme::lerp(NETWORK, Color32::WHITE, 0.45))],
+            widgets::nice_max(net_rx.max().max(net_tx.max()), 64.0 * 1024.0),
         ),
     ];
     for (view, glyph, label, value, sub, color, layers, max) in cards {
@@ -98,7 +103,7 @@ fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
     }
     for (i, gpu) in s.gpus.iter().enumerate() {
         let label = if s.gpus.len() > 1 { format!("GPU {i}") } else { "GPU".to_owned() };
-        let series = &h.gpus[i];
+        let series = tail(&h.gpus[i]);
         if resource_card(
             ui,
             app.view == View::Gpu(i),
@@ -107,7 +112,7 @@ fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
             &format::percent(gpu.utilization),
             &gpu.name,
             GPU,
-            &[Layer::area(series, GPU)],
+            &[Layer::area(&series, GPU)],
             100.0,
         )
         .clicked()
@@ -148,7 +153,7 @@ fn brand(app: &mut App, ui: &mut Ui) {
 }
 
 /// Marca desenhada: o traço de um sinal terminando no ponto luminoso dos gráficos.
-fn logo_mark(ui: &Ui, rect: Rect) {
+pub fn logo_mark(ui: &Ui, rect: Rect) {
     let p = ui.painter();
     p.rect_filled(rect, CornerRadius::same(8), GRAPHITE_2);
     p.rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, theme::HAIRLINE_STRONG), egui::StrokeKind::Inside);

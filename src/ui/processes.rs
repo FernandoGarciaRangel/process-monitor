@@ -152,6 +152,8 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
     if !snap.gpus.is_empty() && width > 600.0 {
         cols.push(Col::Gpu);
     }
+    // O nome fica sempre: é por ele que se acha o processo.
+    cols.retain(|&c| c == Col::Name || app.column_visible("processes", c.key()));
 
     if rows.is_empty() {
         empty_state(ui, &app.search);

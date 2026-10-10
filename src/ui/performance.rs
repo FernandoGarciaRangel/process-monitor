@@ -4,7 +4,7 @@ use egui::{Align, Align2, Color32, Layout, Margin, RichText, Ui, pos2, vec2};
 
 use crate::app::{App, View};
 use crate::format;
-use crate::sampler::{HISTORY_LEN, Snapshot, percent_of};
+use crate::sampler::{Snapshot, percent_of};
 use crate::theme::{self, CPU, DISK, GPU, INK, INK_2, INK_3, INK_4, MEMORY, NETWORK};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
@@ -35,7 +35,7 @@ fn title(ui: &mut Ui, name: &str, subtitle: &str, value: &str, color: Color32) {
 }
 
 /// Gráfico principal dentro de um cartão, com a escala no canto e a janela de tempo embaixo.
-fn big_chart(ui: &mut Ui, layers: &[Layer], max: f32, scale_label: &str, height: f32) {
+fn big_chart(ui: &mut Ui, s: &Snapshot, layers: &[Layer], max: f32, scale_label: &str, height: f32) {
     widgets::card().show(ui, |ui| {
         let size = vec2(ui.available_width(), height);
         let response = widgets::chart(ui, size, layers, max, ChartStyle::FULL);
@@ -45,7 +45,7 @@ fn big_chart(ui: &mut Ui, layers: &[Layer], max: f32, scale_label: &str, height:
         p.text(
             pos2(r.left() + 2.0, r.bottom() + 6.0),
             Align2::LEFT_TOP,
-            format!("{HISTORY_LEN} amostras"),
+            format!("{} min", s.history_window.as_secs() / 60),
             theme::regular(11.0),
             INK_4,
         );
@@ -66,7 +66,7 @@ fn stats_row(ui: &mut Ui, items: &[(&str, String)]) {
 
 fn cpu(ui: &mut Ui, s: &Snapshot) {
     title(ui, "CPU", &s.cpu_brand, &format::percent(s.cpu), CPU);
-    big_chart(ui, &[Layer::area(&s.history.cpu, CPU)], 100.0, "100%", 220.0);
+    big_chart(ui, s, &[Layer::area(&s.history.cpu, CPU)], 100.0, "100%", 220.0);
     ui.add_space(18.0);
     let threads_hint = match s.physical_cores {
         Some(p) => format!("{p} físicos · {} lógicos", s.cores.len()),
@@ -124,7 +124,7 @@ fn cpu(ui: &mut Ui, s: &Snapshot) {
 fn memory(ui: &mut Ui, s: &Snapshot) {
     let subtitle = format!("{} instalados", format::bytes(s.mem_total));
     title(ui, "Memória", &subtitle, &format::percent(s.mem_percent()), MEMORY);
-    big_chart(ui, &[Layer::area(&s.history.memory, MEMORY)], 100.0, "100%", 220.0);
+    big_chart(ui, s, &[Layer::area(&s.history.memory, MEMORY)], 100.0, "100%", 220.0);
     ui.add_space(18.0);
 
     stats_row(
@@ -161,6 +161,7 @@ fn disk(ui: &mut Ui, s: &Snapshot) {
     title(ui, "Disco", &format!("{} unidades", s.disks.len()), &format::rate(s.disk_read + s.disk_write), DISK);
     big_chart(
         ui,
+        s,
         &[Layer::area(&s.history.disk_read, DISK), Layer::line(&s.history.disk_write, write_color)],
         max,
         &format::rate(max as f64),
@@ -220,6 +221,7 @@ fn network(ui: &mut Ui, s: &Snapshot) {
     title(ui, "Rede", &subtitle, &format::rate(s.net_rx + s.net_tx), NETWORK);
     big_chart(
         ui,
+        s,
         &[Layer::area(&s.history.net_rx, NETWORK), Layer::line(&s.history.net_tx, tx_color)],
         max,
         &format::rate(max as f64),
@@ -250,7 +252,7 @@ fn gpu(_app: &mut App, ui: &mut Ui, s: &Snapshot, index: usize) {
     };
     let label = if s.gpus.len() > 1 { format!("GPU {index}") } else { "GPU".to_owned() };
     title(ui, &label, &g.name, &format::percent(g.utilization), GPU);
-    big_chart(ui, &[Layer::area(series, GPU)], 100.0, "100%", 220.0);
+    big_chart(ui, s, &[Layer::area(series, GPU)], 100.0, "100%", 220.0);
     ui.add_space(18.0);
     stats_row(
         ui,

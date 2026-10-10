@@ -1,27 +1,84 @@
-//! Configurações do app, num modal aberto pela engrenagem da barra lateral.
+//! Configurações do app, num modal aberto pela engrenagem da barra lateral: seções à
+//! esquerda, opções da seção à direita.
 
-use egui::{Color32, CornerRadius, Frame, Id, Margin, RichText, Stroke, Ui};
+use egui::{Align2, Color32, CornerRadius, Frame, Id, Margin, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
 use egui_phosphor::regular as icon;
 
-use crate::app::App;
+use crate::app::{App, HistoryWindow, TABLES};
 use crate::format;
-use crate::theme::{self, ACCENT, HAIRLINE_STRONG, INK, INK_2, INK_3, R_LG};
-use crate::ui::widgets;
-use crate::updater::{State, Version};
+use crate::theme::{self, ACCENT, GRAPHITE_1, HAIRLINE_STRONG, INK, INK_2, INK_3, INK_4, R_LG, R_MD, R_SM};
+use crate::ui::{columns, ports, widgets};
+use crate::updater::{self, State, Version};
+
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Section {
+    #[default]
+    General,
+    Processes,
+    Ports,
+    Charts,
+    Updates,
+    About,
+}
+
+impl Section {
+    const ALL: [Section; 6] =
+        [Section::General, Section::Processes, Section::Ports, Section::Charts, Section::Updates, Section::About];
+
+    fn label(self) -> &'static str {
+        match self {
+            Section::General => "Geral",
+            Section::Processes => "Processos",
+            Section::Ports => "Portas",
+            Section::Charts => "Gráficos",
+            Section::Updates => "Atualizações",
+            Section::About => "Sobre",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Section::General => icon::SLIDERS_HORIZONTAL,
+            Section::Processes => icon::LIST_BULLETS,
+            Section::Ports => icon::PLUGS_CONNECTED,
+            Section::Charts => icon::CHART_LINE,
+            Section::Updates => icon::ARROW_CIRCLE_UP,
+            Section::About => icon::INFO,
+        }
+    }
+}
+
+/// Colunas que dá para esconder (o nome, e a porta na tela de portas, ficam sempre).
+const PROCESS_COLUMNS: [(&str, &str); 6] =
+    [("pid", "PID"), ("user", "Usuário"), ("cpu", "CPU"), ("memory", "Memória"), ("disk", "Disco"), ("gpu", "GPU")];
+const PORT_COLUMNS: [(&str, &str); 6] = [
+    ("address", "Endereço"),
+    ("pid", "PID"),
+    ("response", "Resposta"),
+    ("latency", "Conexão"),
+    ("memory", "Memória"),
+    ("uptime", "Ativo há"),
+];
+
+const NAV_WIDTH: f32 = 168.0;
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
+    let section_id = Id::new("settings_section");
+    let mut section: Section = ctx.data(|d| d.get_temp(section_id)).unwrap_or_default();
     let mut close = false;
+    // Cabe na tela de 1366×768 com folga para a barra de título.
+    let height = (ctx.content_rect().height() - 120.0).clamp(320.0, 520.0);
     let modal = egui::Modal::new(Id::new("settings"))
         .frame(
             Frame::NONE
                 .fill(theme::GRAPHITE_2)
                 .stroke(Stroke::new(1.0, HAIRLINE_STRONG))
                 .corner_radius(CornerRadius::same(R_LG))
-                .inner_margin(Margin::same(22)),
+                .inner_margin(Margin::same(18)),
         )
         .backdrop_color(Color32::from_black_alpha(150))
         .show(ctx, |ui| {
-            ui.set_width(440.0);
+            ui.set_width(700.0);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(icon::GEAR_SIX).font(theme::regular(20.0)).color(INK_2));
                 ui.label(RichText::new("Configurações").font(theme::semibold(16.0)).color(INK));
@@ -31,53 +88,317 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     }
                 });
             });
-            ui.add_space(14.0);
-            updates(app, ui);
+            ui.add_space(12.0);
+            ui.horizontal_top(|ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(NAV_WIDTH);
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    for s in Section::ALL {
+                        if nav_item(ui, s == section, s.icon(), s.label()).clicked() {
+                            section = s;
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                egui::ScrollArea::vertical()
+                    .id_salt(("settings_scroll", section.label()))
+                    .max_height(height)
+                    .min_scrolled_height(height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // `vertical`: o conteúdo herdaria o layout horizontal da linha.
+                        ui.vertical(|ui| {
+                            ui.set_width(ui.available_width() - 8.0);
+                            match section {
+                                Section::General => general(app, ui),
+                                Section::Processes => processes(app, ui),
+                                Section::Ports => ports_section(app, ui),
+                                Section::Charts => charts(app, ui),
+                                Section::Updates => updates(app, ui),
+                                Section::About => about(app, ui),
+                            }
+                        });
+                    });
+            });
         });
+    ctx.data_mut(|d| d.insert_temp(section_id, section));
     if close || modal.should_close() {
         app.settings_open = false;
     }
 }
 
-fn updates(app: &mut App, ui: &mut Ui) {
-    widgets::section_label(ui, "Atualizações");
+fn nav_item(ui: &mut Ui, selected: bool, glyph: &str, label: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(NAV_WIDTH, 34.0), Sense::click());
+    let p = ui.painter();
+    let fill = if selected {
+        GRAPHITE_1
+    } else if response.hovered() {
+        theme::GRAPHITE_3
+    } else {
+        Color32::TRANSPARENT
+    };
+    p.rect_filled(rect, CornerRadius::same(R_MD), fill);
+    if selected {
+        let bar = Rect::from_min_max(pos2(rect.left(), rect.top() + 10.0), pos2(rect.left() + 3.0, rect.bottom() - 10.0));
+        p.rect_filled(bar, CornerRadius::same(2), ACCENT);
+    }
+    let color = if selected { INK } else { INK_2 };
+    p.text(pos2(rect.left() + 14.0, rect.center().y), Align2::LEFT_CENTER, glyph, theme::regular(15.0), color);
+    p.text(pos2(rect.left() + 38.0, rect.center().y), Align2::LEFT_CENTER, label, theme::semibold(13.0), color);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Título e descrição à esquerda, controle à direita. `control_width` reserva o espaço
+/// do controle: sem isso, a descrição quebraria por baixo dele.
+fn row(ui: &mut Ui, title: &str, description: &str, control_width: f32, control: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        // Na passada de medição do modal a largura disponível pode ser zero.
+        let text_width = (ui.available_width() - control_width - 12.0).max(60.0);
+        ui.vertical(|ui| {
+            ui.set_max_width(text_width);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(RichText::new(title).font(theme::semibold(13.0)).color(INK));
+            if !description.is_empty() {
+                ui.add(egui::Label::new(RichText::new(description).font(theme::regular(12.0)).color(INK_3)).wrap());
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
+    });
+}
+
+fn divider(ui: &mut Ui) {
+    ui.add_space(8.0);
+    crate::app::hairline(ui);
+    ui.add_space(8.0);
+}
+
+fn heading(ui: &mut Ui, text: &str) {
+    widgets::section_label(ui, text);
     ui.add_space(6.0);
+}
+
+/// Botões lado a lado, um selecionado (intervalo, janela de histórico).
+fn segmented<T: Copy + PartialEq>(ui: &mut Ui, current: T, options: &[(T, String)]) -> Option<T> {
+    let mut chosen = None;
+    ui.spacing_mut().item_spacing.x = 2.0;
+    // right_to_left: o último da lista fica mais à direita.
+    for (value, text) in options.iter().rev() {
+        let selected = *value == current;
+        let button = egui::Button::selectable(
+            selected,
+            RichText::new(text).font(theme::regular(12.5)).color(if selected { INK } else { INK_3 }),
+        )
+        .corner_radius(CornerRadius::same(R_SM))
+        .min_size(vec2(52.0, 28.0));
+        if ui.add(button).clicked() && !selected {
+            chosen = Some(*value);
+        }
+    }
+    chosen
+}
+
+fn general(app: &mut App, ui: &mut Ui) {
+    heading(ui, "Janela");
     widgets::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            // Reserva o espaço do interruptor: sem isso, o texto quebra por baixo dele.
-            let text_width = ui.available_width() - 56.0;
-            ui.vertical(|ui| {
-                ui.set_max_width(text_width);
-                ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(RichText::new("Baixar atualizações automaticamente").font(theme::semibold(13.0)).color(INK));
-                ui.label(
-                    RichText::new("Confere o GitHub ao abrir e a cada 6 horas. A instalação só acontece quando você mandar.")
-                        .font(theme::regular(12.0))
-                        .color(INK_3),
-                );
+        let (autostart, minimized) = app.autostart;
+        row(ui, "Iniciar com o Windows", "Abre o Process Monitor quando você entra na sua conta.", 40.0, |ui| {
+            let mut on = autostart;
+            if widgets::toggle(ui, &mut on).changed() {
+                app.set_autostart(on, minimized);
+            }
+        });
+        divider(ui);
+        let hint = if app.minimize_to_tray {
+            "Na inicialização do Windows, abre só como ícone na bandeja."
+        } else {
+            "Na inicialização do Windows, abre minimizado na barra de tarefas."
+        };
+        ui.add_enabled_ui(autostart, |ui| {
+            row(ui, "Abrir minimizado", hint, 40.0, |ui| {
+                let mut on = minimized;
+                if widgets::toggle(ui, &mut on).changed() {
+                    app.set_autostart(true, on);
+                }
             });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        });
+        divider(ui);
+        row(
+            ui,
+            "Minimizar para a bandeja",
+            "O X esconde a janela e o app continua no ícone da bandeja. Para fechar de vez, use Sair no menu do ícone.",
+            40.0,
+            |ui| {
+                let mut on = app.minimize_to_tray;
+                if widgets::toggle(ui, &mut on).changed() {
+                    app.set_minimize_to_tray(on);
+                }
+            },
+        );
+        divider(ui);
+        row(ui, "Sempre visível", "A janela fica por cima das outras.", 40.0, |ui| {
+            let mut on = app.always_on_top;
+            if widgets::toggle(ui, &mut on).changed() {
+                let ctx = ui.ctx().clone();
+                app.set_always_on_top(&ctx, on);
+            }
+        });
+    });
+
+    ui.add_space(16.0);
+    heading(ui, "Coleta");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        row(
+            ui,
+            "Intervalo de atualização",
+            "De quanto em quanto tempo os números e gráficos são lidos. Menos tempo, mais CPU do próprio app.",
+            170.0,
+            |ui| {
+                let options = [(500, "0,5 s".to_owned()), (1000, "1 s".to_owned()), (2000, "2 s".to_owned())];
+                if let Some(ms) = segmented(ui, app.interval_ms, &options) {
+                    app.set_interval(ms);
+                }
+            },
+        );
+    });
+}
+
+fn column_checks(app: &mut App, ui: &mut Ui, table: &str, columns: &[(&str, &str)]) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(18.0, 8.0);
+        for (key, label) in columns {
+            let mut visible = app.column_visible(table, key);
+            if ui.checkbox(&mut visible, RichText::new(*label).font(theme::regular(13.0)).color(INK_2)).changed() {
+                app.set_column_visible(table, key, visible);
+            }
+        }
+    });
+}
+
+fn reset_widths_row(ui: &mut Ui, table: &str) {
+    row(ui, "Larguras das colunas", "Volta as colunas desta tabela para a largura inicial.", 90.0, |ui| {
+        if widgets::ghost_button(ui, "Restaurar").clicked() {
+            columns::reset_widths(ui.ctx(), table);
+        }
+    });
+}
+
+fn processes(app: &mut App, ui: &mut Ui) {
+    heading(ui, "Colunas visíveis");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        column_checks(app, ui, TABLES[0], &PROCESS_COLUMNS);
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("O nome aparece sempre. Em janelas estreitas, Usuário e GPU somem sozinhos.")
+                .font(theme::regular(12.0))
+                .color(INK_4),
+        );
+        divider(ui);
+        reset_widths_row(ui, TABLES[0]);
+    });
+}
+
+fn ports_section(app: &mut App, ui: &mut Ui) {
+    heading(ui, "Lista");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("Faixas de portas monitoradas").font(theme::semibold(13.0)).color(INK));
+        ui.label(
+            RichText::new("As portas das faixas aparecem sempre na lista, mesmo de programas que não são de desenvolvimento.")
+                .font(theme::regular(12.0))
+                .color(INK_3),
+        );
+        ui.add_space(6.0);
+        ports::ranges_field(app, ui);
+        divider(ui);
+        row(
+            ui,
+            "Mostrar todas as portas",
+            "Inclui serviços do Windows e outros programas, além dos servidores de desenvolvimento e das faixas.",
+            40.0,
+            |ui| {
+                widgets::toggle(ui, &mut app.ports_all);
+            },
+        );
+        divider(ui);
+        row(
+            ui,
+            "Sondar HTTP",
+            "Abre uma conexão com cada servidor a cada 2 s e faz um GET a cada 30 s para mostrar se ele responde. \
+             Desligado, nenhuma requisição é feita e as colunas Resposta e Conexão somem.",
+            40.0,
+            |ui| {
+                widgets::toggle(ui, &mut app.probe_http);
+            },
+        );
+    });
+
+    ui.add_space(16.0);
+    heading(ui, "Colunas visíveis");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        column_checks(app, ui, TABLES[1], &PORT_COLUMNS);
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Porta e projeto aparecem sempre. Em janelas estreitas, Endereço, Conexão e Ativo há somem sozinhos.")
+                .font(theme::regular(12.0))
+                .color(INK_4),
+        );
+        divider(ui);
+        reset_widths_row(ui, TABLES[1]);
+    });
+}
+
+fn charts(app: &mut App, ui: &mut Ui) {
+    heading(ui, "Desempenho");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        row(
+            ui,
+            "Janela de histórico",
+            "Quanto tempo os gráficos de CPU, memória, disco, rede e GPU mostram. Os cartões da barra lateral \
+             ficam sempre no último minuto. Ao aumentar, o gráfico enche aos poucos.",
+            190.0,
+            |ui| {
+                let options: Vec<(HistoryWindow, String)> = HistoryWindow::ALL.iter().map(|w| (*w, w.label())).collect();
+                if let Some(w) = segmented(ui, app.history_window, &options) {
+                    app.set_history_window(w);
+                }
+            },
+        );
+    });
+}
+
+fn updates(app: &mut App, ui: &mut Ui) {
+    heading(ui, "Atualizações");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        row(
+            ui,
+            "Baixar atualizações automaticamente",
+            "Confere o GitHub ao abrir e a cada 6 horas. A instalação só acontece quando você mandar.",
+            40.0,
+            |ui| {
                 let mut on = app.auto_update;
                 if widgets::toggle(ui, &mut on).changed() {
                     app.set_auto_update(on);
                 }
-            });
-        });
-
-        ui.add_space(8.0);
-        crate::app::hairline(ui);
-        ui.add_space(8.0);
+            },
+        );
+        divider(ui);
 
         let state = app.update_state.clone();
         let mut install = false;
+        let (text, color) = status_text(&state);
+        let title = format!("Versão {}", Version::current());
         ui.horizontal(|ui| {
-            let text_width = ui.available_width() - 170.0;
+            let text_width = (ui.available_width() - 170.0).max(60.0);
             ui.vertical(|ui| {
                 ui.set_max_width(text_width);
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(RichText::new(format!("Versão {}", Version::current())).font(theme::semibold(13.0)).color(INK));
-                let (text, color) = status_text(&state);
+                ui.label(RichText::new(title).font(theme::semibold(13.0)).color(INK));
                 ui.add(egui::Label::new(RichText::new(text).font(theme::regular(12.0)).color(color)).wrap());
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match &*state {
@@ -118,4 +439,96 @@ fn status_text(state: &State) -> (String, Color32) {
         State::Ready { version, .. } => (format!("Versão {version} baixada e pronta para instalar"), ACCENT),
         State::Failed(e) => (format!("Não foi possível verificar: {e}"), theme::DANGER),
     }
+}
+
+fn about(app: &mut App, ui: &mut Ui) {
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
+            crate::ui::sidebar::logo_mark(ui, rect);
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(RichText::new("Process Monitor").font(theme::semibold(16.0)).color(INK));
+                ui.label(
+                    RichText::new(format!("Versão {} · Monitor de sistema para Windows", Version::current()))
+                        .font(theme::regular(12.5))
+                        .color(INK_3),
+                );
+            });
+        });
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            let repo = format!("https://github.com/{}", updater::REPO);
+            if link(ui, icon::GITHUB_LOGO, "Código no GitHub").clicked() {
+                crate::platform::shell_open(&repo);
+            }
+            ui.add_space(12.0);
+            if link(ui, icon::NOTE, "Notas desta versão").clicked() {
+                crate::platform::shell_open(&format!("{repo}/releases/tag/v{}", Version::current()));
+            }
+        });
+    });
+
+    ui.add_space(16.0);
+    heading(ui, "Dados");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let data_dir = eframe::storage_dir("Process Monitor");
+        let path = data_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
+        row(ui, "Pasta de dados", &path, 90.0, |ui| {
+            if ui.add_enabled(data_dir.is_some(), egui::Button::new("Abrir")).clicked()
+                && let Some(dir) = &data_dir
+            {
+                let _ = std::fs::create_dir_all(dir);
+                crate::platform::shell_open(&dir.display().to_string());
+            }
+        });
+        divider(ui);
+
+        let confirm_id = Id::new("settings_reset_confirm");
+        let confirming: bool = ui.data(|d| d.get_temp(confirm_id)).unwrap_or(false);
+        if confirming {
+            ui.label(RichText::new("Redefinir todas as configurações?").font(theme::semibold(13.0)).color(INK));
+            ui.label(
+                RichText::new(
+                    "Volta tudo ao padrão: janela, colunas, larguras, portas, gráficos e atualização. \
+                     A inicialização com o Windows é desligada.",
+                )
+                .font(theme::regular(12.0))
+                .color(INK_3),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if widgets::danger_button(ui, "Redefinir", true).clicked() {
+                    let ctx = ui.ctx().clone();
+                    app.reset_settings(&ctx);
+                    ui.data_mut(|d| d.insert_temp(confirm_id, false));
+                }
+                if widgets::ghost_button(ui, "Cancelar").clicked() {
+                    ui.data_mut(|d| d.insert_temp(confirm_id, false));
+                }
+            });
+        } else {
+            row(ui, "Redefinir configurações", "Volta todas as opções ao padrão.", 100.0, |ui| {
+                if widgets::ghost_button(ui, "Redefinir…").clicked() {
+                    ui.data_mut(|d| d.insert_temp(confirm_id, true));
+                }
+            });
+        }
+    });
+}
+
+/// Texto clicável em laranja, com ícone.
+fn link(ui: &mut Ui, glyph: &str, text: &str) -> egui::Response {
+    let response = ui.add(
+        egui::Label::new(RichText::new(format!("{glyph}  {text}")).font(theme::regular(13.0)).color(ACCENT))
+            .sense(Sense::click()),
+    );
+    if response.hovered() {
+        let r = response.rect;
+        ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, ACCENT.gamma_multiply(0.6)));
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

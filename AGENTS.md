@@ -143,6 +143,25 @@ versão do redirecionamento de `github.com/<repo>/releases/latest` e baixa
 - Release sem token: o repositório tem que ser público para isso funcionar.
 - Teste de rede (ignorado por padrão): `cargo test updater -- --ignored`.
 
+## 🔴 Bandeja e instância única
+
+`src/tray.rs`: uma thread com uma janela de nível superior **oculta** (classe
+`ProcessMonitor.Tray`, título "Process Monitor Tray"), que cuida do ícone, do menu
+e dos balões, e recebe o pedido de fechar do Windows.
+
+- Com "Minimizar para a bandeja" (padrão), o X só esconde. Para encerrar de verdade,
+  use `App::quit` (menu Sair, instalador, atualização, reinício como administrador).
+  Um `ViewportCommand::Close` solto cai na bandeja.
+- O instalador fecha o app pelo Restart Manager (`WM_QUERYENDSESSION` com
+  `ENDSESSION_CLOSEAPP`), que só chega a janelas de nível superior. Não troque a
+  janela da bandeja por `HWND_MESSAGE`: o X que esconde travaria a atualização.
+- Instância única por mutex: uma segunda cópia avisa a primeira e sai na hora. Num
+  script, espere o processo anterior sumir antes de abrir outro. O build de debug
+  usa nomes com `.dev`, então convive com a versão instalada (mas não com outro
+  debug). `--replace` espera a anterior fechar; `--minimized` abre só na bandeja.
+- Com a janela escondida, o eframe continua chamando `logic`: é por ali que ela
+  volta (`ViewportCommand::Visible`).
+
 ## Windows em português
 
 O Windows devolve nomes localizados: a conta `S-1-5-18` é "SISTEMA", as descrições

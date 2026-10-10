@@ -9,10 +9,17 @@ mod platform;
 mod ports;
 mod sampler;
 mod theme;
+mod tray;
 mod ui;
 mod updater;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    // Já aberto: a outra instância aparece e esta sai.
+    let Some(_instance) = tray::single_instance(has("--replace")) else { return Ok(()) };
+    let start_minimized = has(platform::MINIMIZED_ARG);
+
     // Tamanho ideal 1240×780, mas nunca maior que a área útil da tela (notebooks com
     // 1366×768 não comportam). Na segunda abertura vale o tamanho que o usuário deixou.
     let area = platform::work_area();
@@ -35,5 +42,5 @@ fn main() -> eframe::Result {
         viewport = viewport.with_icon(icon);
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("Process Monitor", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+    eframe::run_native("Process Monitor", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, start_minimized)))))
 }

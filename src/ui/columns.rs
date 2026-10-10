@@ -26,6 +26,11 @@ fn state_id(salt: &str) -> Id {
     Id::new(("column_widths", salt))
 }
 
+/// Esquece as larguras que o usuário deixou na tabela `salt`.
+pub fn reset_widths(ctx: &egui::Context, salt: &str) {
+    ctx.data_mut(|d| d.remove::<Widths>(state_id(salt)));
+}
+
 fn load(ui: &Ui, id: Id) -> Widths {
     ui.data_mut(|d| d.get_persisted(id)).unwrap_or_default()
 }

@@ -5,7 +5,7 @@ use std::os::windows::process::CommandExt;
 use std::path::Path;
 
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, HLOCAL, LocalFree, RECT,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, HLOCAL, LocalFree, RECT,
 };
 use windows::Win32::Security::Authorization::ConvertStringSidToSidW;
 use windows::Win32::Security::{LookupAccountSidW, PSID, SID_NAME_USE};
@@ -18,6 +18,9 @@ use windows::Win32::Storage::FileSystem::{
     FILE_FLAGS_AND_ATTRIBUTES, GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+use windows::Win32::System::Registry::{
+    HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
+};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, IsProcessCritical, OpenProcess, OpenProcessToken,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
@@ -152,16 +155,73 @@ pub fn is_elevated() -> bool {
 }
 
 /// Abre uma nova instância elevada (UAC). `Ok` quando o usuário aceitou; o chamador
-/// fecha a instância atual.
+/// fecha a instância atual. `--replace` faz a nova esperar esta sair, em vez de cair
+/// na instância única.
 pub fn relaunch_as_admin() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe = HSTRING::from(exe.as_os_str());
-    let result = unsafe { ShellExecuteW(None, w!("runas"), &exe, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+    let result = unsafe { ShellExecuteW(None, w!("runas"), &exe, w!("--replace"), PCWSTR::null(), SW_SHOWNORMAL) };
     // ShellExecute devolve um valor > 32 em caso de sucesso.
     if result.0 as isize > 32 {
         Ok(())
     } else {
         Err("elevação cancelada".to_owned())
+    }
+}
+
+const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
+const RUN_VALUE: PCWSTR = w!("Process Monitor");
+/// Argumento que a entrada de inicialização passa para abrir sem mostrar a janela.
+pub const MINIMIZED_ARG: &str = "--minimized";
+
+/// Comando registrado para abrir com o Windows (`HKCU\...\Run`), se houver.
+pub fn autostart_command() -> Option<String> {
+    unsafe {
+        let mut len = 0u32;
+        if RegGetValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE, RRF_RT_REG_SZ, None, None, Some(&mut len)).is_err() {
+            return None;
+        }
+        let mut buf = vec![0u16; len as usize / 2];
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            RUN_KEY,
+            RUN_VALUE,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+        .ok()
+        .ok()?;
+        Some(String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]))
+    }
+}
+
+/// Liga ou desliga a abertura com o Windows, apontando para este executável. Por
+/// usuário: não pede administrador.
+pub fn set_autostart(enabled: bool, minimized: bool) -> Result<(), String> {
+    unsafe {
+        if !enabled {
+            let result = RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN_KEY, RUN_VALUE);
+            return if result.is_ok() || result == ERROR_FILE_NOT_FOUND { Ok(()) } else { Err(result.to_hresult().message()) };
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut command = format!("\"{}\"", exe.display());
+        if minimized {
+            command.push(' ');
+            command.push_str(MINIMIZED_ARG);
+        }
+        let wide: Vec<u16> = command.encode_utf16().chain([0]).collect();
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            RUN_KEY,
+            RUN_VALUE,
+            REG_SZ.0,
+            Some(wide.as_ptr().cast()),
+            (wide.len() * 2) as u32,
+        )
+        .ok()
+        .map_err(|e| e.message())
     }
 }
 
@@ -391,6 +451,26 @@ mod tests {
     use super::*;
     use std::process::{Child, Command};
     use std::time::Duration;
+
+    /// Mexe no registro do usuário: `cargo test autostart -- --ignored`. Não roda se
+    /// já houver uma entrada, para não apagar a do app instalado.
+    #[test]
+    #[ignore]
+    fn autostart_roundtrip() {
+        if autostart_command().is_some() {
+            eprintln!("já existe uma entrada de inicialização; teste pulado");
+            return;
+        }
+        set_autostart(true, true).unwrap();
+        let cmd = autostart_command().expect("entrada gravada");
+        assert!(cmd.starts_with('"') && cmd.ends_with(MINIMIZED_ARG), "{cmd}");
+        set_autostart(true, false).unwrap();
+        assert!(!autostart_command().unwrap().contains(MINIMIZED_ARG));
+        set_autostart(false, false).unwrap();
+        assert_eq!(autostart_command(), None);
+        // Desligar de novo, sem entrada, não é erro.
+        set_autostart(false, false).unwrap();
+    }
 
     /// Processo descartável que fica vivo ~30 s se ninguém o finalizar.
     fn spawn_victim() -> Child {
