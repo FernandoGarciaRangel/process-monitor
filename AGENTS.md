@@ -161,6 +161,26 @@ e dos balões, e recebe o pedido de fechar do Windows.
   debug). `--replace` espera a anterior fechar; `--minimized` abre só na bandeja.
 - Com a janela escondida, o eframe continua chamando `logic`: é por ali que ela
   volta (`ViewportCommand::Visible`).
+- Para testar o fechamento pelo instalador sem instalar: X (`WM_CLOSE`) para esconder
+  e depois `RmShutdown` sem forçar no caminho do exe. Mandar `WM_QUERYENDSESSION`
+  na mão não reproduz o Restart Manager e dá falso negativo.
+
+## Alertas
+
+`src/alerts.rs` é só a regra (testável, sem chamada de sistema); quem avalia é a
+thread do `sampler`, a cada coleta, porque ela continua viva com a janela escondida.
+Os avisos saem por `tray::Notifier`; o alvo do último fica em `App::last_alert`
+para o clique no balão abrir o processo ou a porta.
+
+- Porta vigiada só "cai" depois de 3 s fora (reinício rápido não avisa) e só se já
+  foi vista de pé. CPU e memória avisam uma vez por processo, com histerese.
+- O próprio Process Monitor nunca se denuncia.
+
+## Quem está usando um arquivo
+
+`src/locks.rs` usa o Restart Manager (o mesmo do instalador): pega arquivos abertos
+e executáveis em execução, sem administrador. O resultado vem com PID e hora de
+criação; case com a coleta pelos dois (±2 s), nunca só pelo PID.
 
 ## Windows em português
 

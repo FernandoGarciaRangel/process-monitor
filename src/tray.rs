@@ -174,7 +174,6 @@ impl Tray {
     }
 
     /// O usuário clicou no último balão. Devolve `true` uma vez por clique.
-    #[allow(dead_code, reason = "para os alertas, que abrem a tela do aviso ao clicar")]
     pub fn take_balloon_click(&self) -> bool {
         self.shared.balloon_clicked.swap(false, Ordering::Relaxed)
     }

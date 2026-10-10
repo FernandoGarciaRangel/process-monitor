@@ -16,20 +16,29 @@ enum Section {
     General,
     Processes,
     Ports,
+    Alerts,
     Charts,
     Updates,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 6] =
-        [Section::General, Section::Processes, Section::Ports, Section::Charts, Section::Updates, Section::About];
+    const ALL: [Section; 7] = [
+        Section::General,
+        Section::Processes,
+        Section::Ports,
+        Section::Alerts,
+        Section::Charts,
+        Section::Updates,
+        Section::About,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Section::General => "Geral",
             Section::Processes => "Processos",
             Section::Ports => "Portas",
+            Section::Alerts => "Alertas",
             Section::Charts => "Gráficos",
             Section::Updates => "Atualizações",
             Section::About => "Sobre",
@@ -41,6 +50,7 @@ impl Section {
             Section::General => icon::SLIDERS_HORIZONTAL,
             Section::Processes => icon::LIST_BULLETS,
             Section::Ports => icon::PLUGS_CONNECTED,
+            Section::Alerts => icon::BELL_SIMPLE,
             Section::Charts => icon::CHART_LINE,
             Section::Updates => icon::ARROW_CIRCLE_UP,
             Section::About => icon::INFO,
@@ -113,6 +123,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                 Section::General => general(app, ui),
                                 Section::Processes => processes(app, ui),
                                 Section::Ports => ports_section(app, ui),
+                                Section::Alerts => alerts_section(app, ui),
                                 Section::Charts => charts(app, ui),
                                 Section::Updates => updates(app, ui),
                                 Section::About => about(app, ui),
@@ -298,6 +309,114 @@ fn processes(app: &mut App, ui: &mut Ui) {
         divider(ui);
         reset_widths_row(ui, TABLES[0]);
     });
+}
+
+/// Avisos na bandeja. Valem com a janela escondida: quem avalia é a thread da coleta.
+fn alerts_section(app: &mut App, ui: &mut Ui) {
+    let mut config = app.alert_config.clone();
+
+    heading(ui, "Portas vigiadas");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        row(ui, "Avisar quando cair ou voltar", "Depois de 3 s sem escutar, e de novo quando a porta volta.", 40.0, |ui| {
+            widgets::toggle(ui, &mut config.ports_enabled);
+        });
+        divider(ui);
+        if config.watched_ports.is_empty() {
+            ui.label(
+                RichText::new("Nenhuma porta vigiada. Use \"Vigiar porta\" no menu de uma porta, ou adicione aqui.")
+                    .font(theme::regular(12.0))
+                    .color(INK_3),
+            );
+        } else {
+            let mut remove: Option<u16> = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                for &port in &config.watched_ports {
+                    let chip = egui::Button::new(
+                        RichText::new(format!("{port}  {}", icon::X)).font(theme::regular(12.5)).color(INK_2),
+                    )
+                    .fill(GRAPHITE_1)
+                    .stroke(Stroke::new(1.0, HAIRLINE_STRONG))
+                    .corner_radius(CornerRadius::same(R_SM));
+                    if ui.add(chip).on_hover_text("Parar de vigiar").clicked() {
+                        remove = Some(port);
+                    }
+                }
+            });
+            if let Some(port) = remove {
+                config.watched_ports.retain(|p| *p != port);
+            }
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let id = Id::new("alert_port_input");
+            let mut text: String = ui.data_mut(|d| d.get_temp(id)).unwrap_or_default();
+            let edit = egui::TextEdit::singleline(&mut text).hint_text("Porta, ex.: 5173").desired_width(120.0);
+            let response = ui.add(edit);
+            let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let port = text.trim().parse::<u16>().ok().filter(|p| *p > 0);
+            if (ui.add_enabled(port.is_some(), egui::Button::new("Adicionar")).clicked() || enter)
+                && let Some(port) = port
+            {
+                if !config.watched_ports.contains(&port) {
+                    config.watched_ports.push(port);
+                    config.watched_ports.sort_unstable();
+                }
+                text.clear();
+            }
+            ui.data_mut(|d| d.insert_temp(id, text));
+        });
+    });
+
+    ui.add_space(16.0);
+    heading(ui, "Processos");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        row(ui, "CPU alta", "Um processo acima do limite pelo tempo escolhido. Avisa uma vez até ele baixar.", 40.0, |ui| {
+            widgets::toggle(ui, &mut config.cpu_enabled);
+        });
+        ui.add_enabled_ui(config.cpu_enabled, |ui| {
+            row(ui, "Limite", "Do total da máquina, como a coluna CPU.", 230.0, |ui| {
+                let options: Vec<(u32, String)> = [25, 50, 75, 90].iter().map(|p| (*p, format!("{p}%"))).collect();
+                if let Some(p) = segmented(ui, config.cpu_percent.round() as u32, &options) {
+                    config.cpu_percent = p as f32;
+                }
+            });
+            row(ui, "Por quanto tempo", "Picos mais curtos que isso não avisam.", 230.0, |ui| {
+                let options =
+                    [(10, "10 s".to_owned()), (30, "30 s".to_owned()), (60, "1 min".to_owned()), (300, "5 min".to_owned())];
+                if let Some(s) = segmented(ui, config.cpu_secs, &options) {
+                    config.cpu_secs = s;
+                }
+            });
+        });
+        divider(ui);
+        row(ui, "Memória alta", "Um processo com mais memória física que o limite.", 40.0, |ui| {
+            widgets::toggle(ui, &mut config.memory_enabled);
+        });
+        ui.add_enabled_ui(config.memory_enabled, |ui| {
+            row(ui, "Limite", "Memória física do processo.", 270.0, |ui| {
+                const GB: u64 = 1024 * 1024 * 1024;
+                let options: Vec<(u64, String)> = [1, 2, 4, 8, 16].iter().map(|g| (g * GB, format!("{g} GB"))).collect();
+                if let Some(b) = segmented(ui, config.memory_bytes, &options) {
+                    config.memory_bytes = b;
+                }
+            });
+        });
+    });
+
+    ui.add_space(16.0);
+    ui.horizontal(|ui| {
+        if widgets::ghost_button(ui, &format!("{}  Testar aviso", icon::BELL_SIMPLE_RINGING)).clicked() {
+            app.tray.notifier().notify("Teste de alerta", "Os avisos do Process Monitor aparecem assim.");
+        }
+        ui.label(
+            RichText::new("Clicar num aviso abre o processo ou a porta dele.").font(theme::regular(12.0)).color(INK_4),
+        );
+    });
+
+    app.set_alert_config(config);
 }
 
 fn ports_section(app: &mut App, ui: &mut Ui) {

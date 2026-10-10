@@ -158,6 +158,7 @@ enum Action {
     Copy(String),
     Kill(ProcKey, u16),
     Restart(ProcKey, u16),
+    Watch(u16),
     Explore(PathBuf),
     ShowProcess(ProcKey),
     ShowAll,
@@ -197,6 +198,7 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
             Action::Copy(text) => ui.ctx().copy_text(text),
             Action::Kill(key, port) => app.request_kill_port(key, port),
             Action::Restart(key, port) => app.request_restart(key, port),
+            Action::Watch(port) => app.toggle_watch(port),
             Action::Explore(dir) => platform::shell_open(&dir.display().to_string()),
             Action::ShowProcess(key) => {
                 app.view = View::Processes;
@@ -545,7 +547,7 @@ fn header_cell(app: &mut App, ui: &mut Ui, col: Col) {
 
 fn cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, r: &Row, col: Col) {
     match col {
-        Col::Port => port_cell(ui, r),
+        Col::Port => port_cell(ui, r, app.is_watched(r.l.port)),
         Col::Name => name_cell(app, ui, r),
         Col::Address => address_cell(ui, r.l),
         Col::Pid => widgets::right_text(ui, &r.l.pid.to_string(), INK_3),
@@ -575,7 +577,7 @@ fn cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, r: &Row, col: Col) {
 }
 
 /// Número da porta com o ponto de estado: aceso quando responde, vermelho quando falha.
-fn port_cell(ui: &mut Ui, r: &Row) {
+fn port_cell(ui: &mut Ui, r: &Row, watched: bool) {
     let rect = ui.max_rect();
     let painter = ui.painter();
     let dot = pos2(rect.left() + 14.0, rect.center().y);
@@ -589,13 +591,23 @@ fn port_cell(ui: &mut Ui, r: &Row) {
             painter.circle_filled(dot, 2.4, INK_4);
         }
     }
-    painter.text(
+    let number = painter.text(
         pos2(rect.left() + 26.0, rect.center().y),
         Align2::LEFT_CENTER,
         r.l.port.to_string(),
         theme::semibold(13.5),
         INK,
     );
+    // Porta vigiada: o sino ao lado do número (avisa quando ela cai ou volta).
+    if watched {
+        painter.text(
+            pos2(number.right() + 5.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            icon::BELL_SIMPLE_RINGING,
+            theme::regular(12.0),
+            theme::ACCENT,
+        );
+    }
 }
 
 /// Ícone, nome com a etiqueta da plataforma e, embaixo, o título ou o comando.
@@ -701,6 +713,20 @@ fn port_menu(app: &mut App, ui: &mut Ui, r: &Row, actions: &mut Vec<Action>) {
     }
     if protected {
         ui.label(RichText::new("Processo crítico do sistema").font(theme::regular(11.5)).color(INK_3));
+    }
+    let watched = app.is_watched(r.l.port);
+    let (glyph, text) = if watched {
+        (icon::BELL_SIMPLE_SLASH, "Parar de vigiar a porta")
+    } else {
+        (icon::BELL_SIMPLE_RINGING, "Vigiar porta")
+    };
+    if ui
+        .button(format!("{glyph}  {text}"))
+        .on_hover_text("Avisa na bandeja quando a porta cair e quando voltar")
+        .clicked()
+    {
+        actions.push(Action::Watch(r.l.port));
+        ui.close();
     }
     let restart = app.restart_target(p.key());
     let button = ui

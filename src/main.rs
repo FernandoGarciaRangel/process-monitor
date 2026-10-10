@@ -1,6 +1,7 @@
 // Sem console no build de release; em debug ele fica para ver panics e logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod alerts;
 mod app;
 mod format;
 mod gpu;

@@ -13,6 +13,7 @@ use sysinfo::{
     ProcessesToUpdate, System, UpdateKind,
 };
 
+use crate::alerts::{self, Alert, Alerts};
 use crate::gpu::GpuMonitor;
 use crate::platform;
 use crate::ports::{self, Connection, Listener};
@@ -301,10 +302,15 @@ pub fn percent_of(part: u64, total: u64) -> f32 {
     if total == 0 { 0.0 } else { (part as f64 / total as f64 * 100.0) as f32 }
 }
 
+/// Para onde vão os alertas: chamada na thread da coleta, então precisa ser `Send`.
+pub type AlertSink = Box<dyn Fn(&Alert) + Send>;
+
 enum Command {
     Refresh,
     SetInterval(Duration),
     SetHistoryWindow(Duration),
+    SetAlerts(alerts::Config),
+    SetAlertSink(AlertSink),
 }
 
 pub struct Sampler {
@@ -341,6 +347,16 @@ impl Sampler {
     pub fn set_history_window(&self, window: Duration) {
         let _ = self.tx.send(Command::SetHistoryWindow(window));
     }
+
+    pub fn set_alerts(&self, config: alerts::Config) {
+        let _ = self.tx.send(Command::SetAlerts(config));
+    }
+
+    /// Os alertas são avaliados nesta thread, que continua coletando com a janela
+    /// escondida; `sink` os entrega (balão da bandeja).
+    pub fn set_alert_sink(&self, sink: AlertSink) {
+        let _ = self.tx.send(Command::SetAlertSink(sink));
+    }
 }
 
 fn process_refresh_kind() -> ProcessRefreshKind {
@@ -374,6 +390,10 @@ fn run(
     let mut descriptions: HashMap<PathBuf, Option<String>> = HashMap::new();
     let mut window = window;
     let mut history = History::new(History::points(window, interval));
+    let mut alerts = Alerts::default();
+    let mut alert_config = alerts::Config::default();
+    let mut alert_sink: Option<AlertSink> = None;
+    let own_pid = std::process::id();
 
     let host = System::host_name().unwrap_or_default();
     let physical_cores = System::physical_core_count();
@@ -542,6 +562,13 @@ fn run(
             history_window: window,
         };
 
+        if let Some(sink) = &alert_sink {
+            let fired = alerts.evaluate(Instant::now(), &snapshot.processes, &snapshot.listeners, &alert_config, own_pid);
+            for alert in &fired {
+                sink(alert);
+            }
+        }
+
         if let Ok(mut slot) = latest.lock() {
             *slot = Some(Arc::new(snapshot));
         }
@@ -553,6 +580,8 @@ fn run(
                 match command {
                     Command::SetInterval(d) => interval = d,
                     Command::SetHistoryWindow(w) => window = w,
+                    Command::SetAlerts(c) => alert_config = c,
+                    Command::SetAlertSink(s) => alert_sink = Some(s),
                     Command::Refresh => {}
                 }
                 // Mesma janela de tempo com outro intervalo = outro número de pontos.

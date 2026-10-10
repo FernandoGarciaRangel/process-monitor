@@ -13,6 +13,7 @@ use crate::ports::{self, Kind, PortRange, Prober, Statuses, Target};
 use crate::sampler::{ProcInfo, ProcKey, Sampler, Series, Snapshot};
 use crate::theme::{self, GRAPHITE_0, GRAPHITE_3, HAIRLINE, HAIRLINE_STRONG, INK, INK_2, INK_3, R_LG, R_MD};
 use crate::ui;
+use crate::alerts;
 use crate::tray::Tray;
 use crate::ui::widgets;
 use crate::updater::{self, Updater};
@@ -305,6 +306,9 @@ pub struct App {
     start_minimized: bool,
     /// Fechar de verdade (Sair, instalador, atualização, reinício como administrador).
     quitting: bool,
+    pub alert_config: alerts::Config,
+    /// Alvo do último alerta mostrado, escrito pela thread da coleta.
+    last_alert: Arc<std::sync::Mutex<Option<alerts::Target>>>,
 }
 
 const INTERVAL_KEY: &str = "interval_ms";
@@ -355,7 +359,8 @@ impl App {
             .map(|v| v.split(',').filter(|c| !c.is_empty()).map(str::to_owned).collect())
             .unwrap_or_default();
         let (relaunch_tx, relaunch_rx) = mpsc::channel();
-        Self {
+        let alert_config = load_alert_config(&stored);
+        let app = Self {
             sampler: Sampler::spawn(
                 cc.egui_ctx.clone(),
                 Duration::from_millis(interval_ms),
@@ -415,6 +420,69 @@ impl App {
             autostart: read_autostart(),
             start_minimized,
             quitting: false,
+            alert_config,
+            last_alert: Arc::default(),
+        };
+        app.install_alerts();
+        app
+    }
+
+    /// Os alertas são avaliados na thread da coleta e viram balões da bandeja. O alvo do
+    /// último fica guardado para o clique no balão abrir o processo ou a porta.
+    fn install_alerts(&self) {
+        let notifier = self.tray.notifier();
+        let last = self.last_alert.clone();
+        self.sampler.set_alerts(self.alert_config.clone());
+        self.sampler.set_alert_sink(Box::new(move |alert| {
+            if let Ok(mut slot) = last.lock() {
+                *slot = Some(alert.target);
+            }
+            notifier.notify(&alert.title, &alert.body);
+        }));
+    }
+
+    pub fn set_alert_config(&mut self, config: alerts::Config) {
+        if config != self.alert_config {
+            self.alert_config = config;
+            self.sampler.set_alerts(self.alert_config.clone());
+        }
+    }
+
+    pub fn is_watched(&self, port: u16) -> bool {
+        self.alert_config.watched_ports.contains(&port)
+    }
+
+    /// Liga ou desliga a vigilância de uma porta.
+    pub fn toggle_watch(&mut self, port: u16) {
+        let mut config = self.alert_config.clone();
+        if let Some(i) = config.watched_ports.iter().position(|p| *p == port) {
+            config.watched_ports.remove(i);
+        } else {
+            config.watched_ports.push(port);
+            config.watched_ports.sort_unstable();
+        }
+        self.set_alert_config(config);
+    }
+
+    /// Clique no balão de um alerta: mostra o processo ou a porta do aviso.
+    fn open_last_alert(&mut self) {
+        let target = self.last_alert.lock().ok().and_then(|mut t| t.take());
+        match target {
+            Some(alerts::Target::Process(key)) => {
+                self.view = View::Processes;
+                self.select(Some(key));
+                self.scroll_to_selected = true;
+            }
+            Some(alerts::Target::Port(port)) => {
+                self.view = View::Ports;
+                let owner = self.snap.as_ref().and_then(|s| s.listeners.iter().find(|l| l.port == port).map(|l| l.pid));
+                let key = owner.and_then(|pid| self.snap.as_ref()?.processes.iter().find(|p| p.pid == pid).map(|p| p.key()));
+                if let Some(key) = key {
+                    self.select_port(key, port);
+                    self.scroll_to_port = true;
+                }
+            }
+            None => {}
         }
     }
 
@@ -504,6 +572,9 @@ impl App {
             } else {
                 ctx.request_repaint();
             }
+        }
+        if self.tray.take_balloon_click() {
+            self.open_last_alert();
         }
         if self.tray.take_show() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -1024,6 +1095,7 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        save_alert_config(storage, &self.alert_config);
         storage.set_string(INTERVAL_KEY, self.interval_ms.to_string());
         storage.set_string(GROUP_KEY, if self.group { "1" } else { "0" }.to_owned());
         // Faixas inválidas não são salvas: na próxima abertura volta a última que valia.
@@ -1088,6 +1160,43 @@ fn update_notice(ui: &mut egui::Ui, version: updater::Version) -> Option<bool> {
             });
         });
     choice
+}
+
+const ALERT_PORTS_KEY: &str = "alert_ports";
+const ALERT_PORTS_ON_KEY: &str = "alert_ports_on";
+const ALERT_CPU_ON_KEY: &str = "alert_cpu_on";
+const ALERT_CPU_PERCENT_KEY: &str = "alert_cpu_percent";
+const ALERT_CPU_SECS_KEY: &str = "alert_cpu_secs";
+const ALERT_MEMORY_ON_KEY: &str = "alert_memory_on";
+const ALERT_MEMORY_KEY: &str = "alert_memory_bytes";
+
+/// Configuração dos alertas salva; o que faltar ou for inválido fica no padrão.
+fn load_alert_config(stored: &dyn Fn(&str) -> Option<String>) -> alerts::Config {
+    let defaults = alerts::Config::default();
+    let flag = |key: &str, default: bool| stored(key).map_or(default, |v| v == "1");
+    alerts::Config {
+        watched_ports: stored(ALERT_PORTS_KEY).map(|v| alerts::parse_ports(&v)).unwrap_or_default(),
+        ports_enabled: flag(ALERT_PORTS_ON_KEY, defaults.ports_enabled),
+        cpu_enabled: flag(ALERT_CPU_ON_KEY, defaults.cpu_enabled),
+        cpu_percent: stored(ALERT_CPU_PERCENT_KEY)
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f32| (5.0..=100.0).contains(v))
+            .unwrap_or(defaults.cpu_percent),
+        cpu_secs: stored(ALERT_CPU_SECS_KEY).and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(defaults.cpu_secs),
+        memory_enabled: flag(ALERT_MEMORY_ON_KEY, defaults.memory_enabled),
+        memory_bytes: stored(ALERT_MEMORY_KEY).and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(defaults.memory_bytes),
+    }
+}
+
+fn save_alert_config(storage: &mut dyn eframe::Storage, c: &alerts::Config) {
+    let flag = |on: bool| if on { "1" } else { "0" }.to_owned();
+    storage.set_string(ALERT_PORTS_KEY, alerts::ports_text(&c.watched_ports));
+    storage.set_string(ALERT_PORTS_ON_KEY, flag(c.ports_enabled));
+    storage.set_string(ALERT_CPU_ON_KEY, flag(c.cpu_enabled));
+    storage.set_string(ALERT_CPU_PERCENT_KEY, c.cpu_percent.to_string());
+    storage.set_string(ALERT_CPU_SECS_KEY, c.cpu_secs.to_string());
+    storage.set_string(ALERT_MEMORY_ON_KEY, flag(c.memory_enabled));
+    storage.set_string(ALERT_MEMORY_KEY, c.memory_bytes.to_string());
 }
 
 fn read_autostart() -> (bool, bool) {
