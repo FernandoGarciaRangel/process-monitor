@@ -3,10 +3,10 @@
 use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Ui, vec2};
 use egui_phosphor::regular as icon;
 
-use crate::app::{self, App, View};
+use crate::app::{self, App, HistorySpan, View};
 use crate::format;
 use crate::ports::{Listener, Reply};
-use crate::sampler::ProcKey;
+use crate::sampler::{ProcKey, Series};
 use crate::theme::{self, ACCENT, CPU, HAIRLINE, INK, INK_2, INK_3, MEMORY, R_SM, WELL};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
@@ -65,7 +65,7 @@ fn body(app: &mut App, ui: &mut Ui) {
         Frame::NONE.inner_margin(Margin { left: 20, right: 18, top: 18, bottom: 12 }).show(ui, |ui| {
             header(app, ui, p.display_name(), &p.name, p.pid, p.exe.as_deref(), p.user.as_deref());
             ui.add_space(16.0);
-            live_charts(app, ui, p.cpu, p.memory);
+            live_charts(app, ui, key, p.cpu, p.memory);
             ui.add_space(18.0);
 
             let listening: Vec<&Listener> = snap.listeners.iter().filter(|l| l.pid == p.pid).collect();
@@ -187,9 +187,32 @@ fn header(
     });
 }
 
-/// CPU e memória do processo nos últimos segundos, lado a lado.
-fn live_charts(app: &App, ui: &mut Ui, cpu: f32, memory: u64) {
-    let h = &app.proc_history;
+/// CPU e memória do processo no período escolhido, lado a lado, com a tendência da memória.
+fn live_charts(app: &mut App, ui: &mut Ui, key: ProcKey, cpu: f32, memory: u64) {
+    ui.horizontal(|ui| {
+        widgets::section_label(ui, "Histórico");
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for span in [HistorySpan::TenMinutes, HistorySpan::Minute] {
+                let on = app.history_span == span;
+                let button = egui::Button::selectable(
+                    on,
+                    RichText::new(span.label()).font(theme::regular(11.5)).color(if on { INK } else { INK_3 }),
+                )
+                .corner_radius(CornerRadius::same(R_SM));
+                if ui.add(button).clicked() {
+                    app.history_span = span;
+                }
+            }
+        });
+    });
+    ui.add_space(6.0);
+
+    let points = app.history_span.points(app.interval_ms);
+    let (cpu_series, mem_series) = match app.histories.get(&key) {
+        Some(h) => (h.cpu.tail(points), h.memory.tail(points)),
+        None => (Series::with_capacity(points), Series::with_capacity(points)),
+    };
     let gap = 10.0;
     // Arredondado para baixo: meio pixel a mais por cartão, somado quadro a quadro,
     // fazia o painel crescer sozinho até o limite.
@@ -197,12 +220,12 @@ fn live_charts(app: &App, ui: &mut Ui, cpu: f32, memory: u64) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = gap;
         for (label, value, layer, max, color) in [
-            ("CPU", format::percent(cpu), Layer::area(&h.cpu, CPU), widgets::nice_max(h.cpu.max(), 5.0).min(100.0), CPU),
+            ("CPU", format::percent(cpu), Layer::area(&cpu_series, CPU), widgets::nice_max(cpu_series.max(), 5.0).min(100.0), CPU),
             (
                 "Memória",
                 format::bytes(memory),
-                Layer::area(&h.memory, MEMORY),
-                h.memory.max() * 1.25,
+                Layer::area(&mem_series, MEMORY),
+                mem_series.max() * 1.25,
                 MEMORY,
             ),
         ] {
@@ -223,6 +246,28 @@ fn live_charts(app: &App, ui: &mut Ui, cpu: f32, memory: u64) {
             });
         }
     });
+
+    // Quanto a memória andou no período: é o que denuncia um vazamento.
+    let samples = mem_series.values().len();
+    if samples >= 2 {
+        let secs = (samples as u64 - 1) * app.interval_ms / 1000;
+        let delta = mem_series.last() as i64 - mem_series.first() as i64;
+        let text = memory_trend(delta, secs);
+        ui.add_space(6.0);
+        ui.label(RichText::new(text).font(theme::regular(12.0)).color(INK_3));
+    }
+}
+
+/// "Memória +120 MB em 10 min", "Memória estável em 45 s".
+fn memory_trend(delta: i64, secs: u64) -> String {
+    let period = if secs >= 60 { format!("{} min", (secs + 30) / 60) } else { format!("{secs} s") };
+    // Menos de 1 MB é ruído do coletor de lixo, não tendência.
+    if delta.unsigned_abs() < 1024 * 1024 {
+        format!("Memória estável em {period}")
+    } else {
+        let sign = if delta > 0 { "+" } else { "−" };
+        format!("Memória {sign}{} em {period}", format::bytes(delta.unsigned_abs()))
+    }
 }
 
 /// Portas em que o processo escuta, com a última resposta HTTP. O número leva à tela de portas.
@@ -312,4 +357,26 @@ fn command_line(ui: &mut Ui, cmd: &str) {
             ui.set_width(ui.available_width());
             widgets::long_text(ui, cmd, theme::mono(12.0), INK_2);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tendencia_da_memoria() {
+        const MB: i64 = 1024 * 1024;
+        assert_eq!(memory_trend(120 * MB, 600), "Memória +120 MB em 10 min");
+        assert_eq!(memory_trend(-3 * MB, 45), "Memória −3,00 MB em 45 s");
+        assert_eq!(memory_trend(200 * 1024, 590), "Memória estável em 10 min");
+    }
+
+    #[test]
+    fn periodo_em_pontos() {
+        assert_eq!(HistorySpan::Minute.points(1000), 60);
+        assert_eq!(HistorySpan::TenMinutes.points(1000), 600);
+        assert_eq!(HistorySpan::Minute.points(500), 120);
+        assert_eq!(HistorySpan::TenMinutes.points(500), app::PROC_HISTORY_LEN);
+        assert_eq!(HistorySpan::TenMinutes.points(2000), 300);
+    }
 }

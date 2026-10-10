@@ -5,7 +5,7 @@ use egui::{
     Shape, Stroke, TextureHandle, Ui, Vec2, pos2, vec2,
 };
 
-use crate::sampler::{HISTORY_LEN, Series};
+use crate::sampler::Series;
 use crate::theme::{self, GRAPHITE_1, HAIRLINE, INK, INK_2, INK_3, INK_4, R_MD, R_SM, WELL};
 
 /// Uma série num gráfico. `fill` pinta a área com degradê; sem ele, só a linha.
@@ -60,7 +60,9 @@ pub fn paint_chart(ui: &Ui, rect: Rect, layers: &[Layer], max: f32, style: Chart
     let pad = if style.head { 5.0 } else { 1.0 };
     let plot = Rect::from_min_max(rect.min + vec2(0.0, pad), rect.max - vec2(pad, 0.5));
     let max = max.max(f32::EPSILON);
-    let step = plot.width() / (HISTORY_LEN - 1) as f32;
+    // A escala horizontal é a capacidade da série: o histórico incompleto fica à direita.
+    let span = layers.iter().map(|l| l.series.capacity()).max().unwrap_or(2);
+    let step = plot.width() / (span - 1) as f32;
 
     for layer in layers {
         let n = layer.series.values().len();

@@ -20,29 +20,59 @@ use crate::ports::{self, Listener};
 /// Pontos guardados em cada série. Com 1 s de intervalo, um minuto de histórico.
 pub const HISTORY_LEN: usize = 60;
 
-#[derive(Clone, Debug, Default)]
-pub struct Series(VecDeque<f32>);
+/// Os valores mais recentes de uma medida, até `cap` pontos; o mais antigo sai primeiro.
+#[derive(Clone, Debug)]
+pub struct Series {
+    values: VecDeque<f32>,
+    cap: usize,
+}
+
+impl Default for Series {
+    fn default() -> Self {
+        Self::with_capacity(HISTORY_LEN)
+    }
+}
 
 impl Series {
+    pub fn with_capacity(cap: usize) -> Self {
+        Self { values: VecDeque::new(), cap: cap.max(2) }
+    }
+
+    /// Quantos pontos cabem: é a largura do gráfico, mesmo com o histórico incompleto.
+    pub fn capacity(&self) -> usize {
+        self.cap
+    }
+
     pub fn push(&mut self, value: f32) {
-        if self.0.len() == HISTORY_LEN {
-            self.0.pop_front();
+        if self.values.len() == self.cap {
+            self.values.pop_front();
         }
-        self.0.push_back(value);
+        self.values.push_back(value);
     }
 
     pub fn values(&self) -> impl ExactSizeIterator<Item = f32> + '_ {
-        self.0.iter().copied()
+        self.values.iter().copied()
+    }
+
+    pub fn first(&self) -> f32 {
+        self.values.front().copied().unwrap_or(0.0)
     }
 
     pub fn last(&self) -> f32 {
-        self.0.back().copied().unwrap_or(0.0)
+        self.values.back().copied().unwrap_or(0.0)
     }
 
     pub fn max(&self) -> f32 {
-        self.0.iter().copied().fold(0.0, f32::max)
+        self.values.iter().copied().fold(0.0, f32::max)
     }
 
+    /// Os últimos `n` pontos, como uma série de capacidade `n`.
+    pub fn tail(&self, n: usize) -> Series {
+        let mut tail = Series::with_capacity(n);
+        let skip = self.values.len().saturating_sub(tail.cap);
+        tail.values.extend(self.values.iter().skip(skip));
+        tail
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -580,6 +610,16 @@ pub(crate) mod tests {
         }
         assert_eq!(s.values().len(), HISTORY_LEN);
         assert_eq!(s.last(), (HISTORY_LEN + 9) as f32);
+        assert_eq!(s.first(), 10.0);
+
+        let mut long = Series::with_capacity(600);
+        for i in 0..700 {
+            long.push(i as f32);
+        }
+        assert_eq!(long.values().len(), 600);
+        assert_eq!(long.first(), 100.0);
+        let tail = long.tail(60);
+        assert_eq!((tail.capacity(), tail.values().len(), tail.first(), tail.last()), (60, 60, 640.0, 699.0));
     }
 
     #[test]

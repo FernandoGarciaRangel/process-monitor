@@ -145,13 +145,44 @@ pub struct Toast {
     pub until: Instant,
 }
 
-/// Histórico só do processo selecionado, para as sparklines do painel de detalhes.
-#[derive(Default)]
+/// Pontos de histórico por processo: 10 minutos mesmo no intervalo de 0,5 s.
+pub const PROC_HISTORY_LEN: usize = 1200;
+
+/// CPU e memória de um processo desde que o app o viu, para o painel de detalhes.
 pub struct ProcHistory {
-    pub key: Option<ProcKey>,
     pub cpu: Series,
     pub memory: Series,
-    pub last_seq: u64,
+}
+
+impl ProcHistory {
+    fn new() -> Self {
+        Self { cpu: Series::with_capacity(PROC_HISTORY_LEN), memory: Series::with_capacity(PROC_HISTORY_LEN) }
+    }
+}
+
+/// Período dos gráficos do painel de detalhes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistorySpan {
+    Minute,
+    TenMinutes,
+}
+
+impl HistorySpan {
+    pub fn label(self) -> &'static str {
+        match self {
+            HistorySpan::Minute => "1 min",
+            HistorySpan::TenMinutes => "10 min",
+        }
+    }
+
+    /// Pontos que cabem no período com o intervalo de coleta atual (no máximo o histórico).
+    pub fn points(self, interval_ms: u64) -> usize {
+        let secs = match self {
+            HistorySpan::Minute => 60,
+            HistorySpan::TenMinutes => 600,
+        };
+        ((secs * 1000 / interval_ms.max(1)) as usize).clamp(2, PROC_HISTORY_LEN)
+    }
 }
 
 pub struct App {
@@ -168,7 +199,10 @@ pub struct App {
     /// Posição de cada linha no quadro anterior, para desempatar a ordenação.
     pub prev_rank: HashMap<ProcKey, usize>,
     pub prev_group_rank: HashMap<String, usize>,
-    pub proc_history: ProcHistory,
+    /// Histórico de todos os processos vivos, alimentado a cada coleta: ao selecionar
+    /// um processo, o gráfico já vem com os últimos minutos.
+    pub histories: HashMap<ProcKey, ProcHistory>,
+    pub history_span: HistorySpan,
     pub confirm: Option<KillRequest>,
     pub toasts: Vec<Toast>,
     pub icons: IconCache,
@@ -209,6 +243,7 @@ const PORT_RANGES_KEY: &str = "port_ranges";
 const PORTS_ALL_KEY: &str = "ports_all";
 const AUTO_UPDATE_KEY: &str = "auto_update";
 const VIEW_KEY: &str = "view";
+const HISTORY_SPAN_KEY: &str = "history_span";
 const SORT_KEY: &str = "sort";
 const SORT_DESC_KEY: &str = "sort_desc";
 const PORT_SORT_KEY: &str = "port_sort";
@@ -247,7 +282,12 @@ impl App {
             scroll_to_selected: false,
             prev_rank: HashMap::new(),
             prev_group_rank: HashMap::new(),
-            proc_history: ProcHistory::default(),
+            histories: HashMap::new(),
+            history_span: if stored(HISTORY_SPAN_KEY).as_deref() == Some("1") {
+                HistorySpan::Minute
+            } else {
+                HistorySpan::TenMinutes
+            },
             confirm: None,
             toasts: Vec::new(),
             icons: IconCache::new(cc.egui_ctx.clone()),
@@ -298,8 +338,6 @@ impl App {
         if self.selected != key {
             self.selected = key;
             self.selected_port = None;
-            self.proc_history = ProcHistory::default();
-            self.track_selected();
         }
     }
 
@@ -471,17 +509,14 @@ impl App {
         }
     }
 
-    /// Guarda o ponto mais recente do processo selecionado (uma vez por coleta).
-    fn track_selected(&mut self) {
-        let (Some(snap), Some(key)) = (&self.snap, self.selected) else { return };
-        if self.proc_history.last_seq == snap.seq && self.proc_history.key == Some(key) {
-            return;
-        }
-        if let Some(p) = snap.find(key) {
-            self.proc_history.key = Some(key);
-            self.proc_history.last_seq = snap.seq;
-            self.proc_history.cpu.push(p.cpu);
-            self.proc_history.memory.push(p.memory as f32);
+    /// Acrescenta a coleta nova ao histórico de cada processo; os que encerraram saem.
+    fn record_histories(&mut self, snap: &Snapshot) {
+        let alive: HashSet<ProcKey> = snap.processes.iter().map(|p| p.key()).collect();
+        self.histories.retain(|k, _| alive.contains(k));
+        for p in &snap.processes {
+            let h = self.histories.entry(p.key()).or_insert_with(ProcHistory::new);
+            h.cpu.push(p.cpu);
+            h.memory.push(p.memory as f32);
         }
     }
 
@@ -615,8 +650,8 @@ impl eframe::App for App {
             {
                 self.view = View::Processes;
             }
+            self.record_histories(&latest);
             self.snap = Some(latest);
-            self.track_selected();
             self.sync_ports();
         }
         // Sonda só quando alguém vê o resultado: na tela de portas ou na seção de portas
@@ -684,6 +719,7 @@ impl eframe::App for App {
         storage.set_string(PORTS_ALL_KEY, if self.ports_all { "1" } else { "0" }.to_owned());
         storage.set_string(AUTO_UPDATE_KEY, if self.auto_update { "1" } else { "0" }.to_owned());
         storage.set_string(VIEW_KEY, self.view.key());
+        storage.set_string(HISTORY_SPAN_KEY, if self.history_span == HistorySpan::Minute { "1" } else { "10" }.to_owned());
         storage.set_string(SORT_KEY, self.sort.key().to_owned());
         storage.set_string(SORT_DESC_KEY, if self.sort_desc { "1" } else { "0" }.to_owned());
         storage.set_string(PORT_SORT_KEY, self.port_sort.key().to_owned());
