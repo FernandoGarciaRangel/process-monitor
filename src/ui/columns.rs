@@ -7,30 +7,36 @@
 //! vizinhas: uma ganha o que a outra perde, e a divisória acompanha o mouse.
 
 use std::collections::HashMap;
-use std::hash::Hash;
 
 use egui::{CursorIcon, Id, Rect, Sense, Ui, pos2, vec2};
 use egui_extras::Column;
 
-pub trait TableCol: Copy + Eq + Hash + Send + Sync + 'static {
+pub trait TableCol: Copy {
+    /// Nome estável da coluna: é a chave da largura salva entre execuções.
+    fn key(self) -> &'static str;
     /// Largura inicial; `None` na coluna que fica com o espaço que sobra.
     fn initial_width(self) -> Option<f32>;
     fn min_width(self) -> f32;
 }
 
-type Widths<C> = HashMap<C, f32>;
+/// Largura por coluna, guardada na memória persistente do egui (o eframe a salva ao fechar).
+type Widths = HashMap<String, f32>;
 
 fn state_id(salt: &str) -> Id {
     Id::new(("column_widths", salt))
 }
 
+fn load(ui: &Ui, id: Id) -> Widths {
+    ui.data_mut(|d| d.get_persisted(id)).unwrap_or_default()
+}
+
 /// As colunas do `TableBuilder`, com a largura que o usuário deixou.
 pub fn columns<C: TableCol>(ui: &Ui, salt: &str, cols: &[C]) -> Vec<Column> {
-    let widths: Widths<C> = ui.data(|d| d.get_temp(state_id(salt))).unwrap_or_default();
+    let widths = load(ui, state_id(salt));
     cols.iter()
         .map(|&col| match col.initial_width() {
             None => Column::remainder().at_least(col.min_width()).clip(true),
-            Some(initial) => Column::exact(widths.get(&col).copied().unwrap_or(initial).max(col.min_width())),
+            Some(initial) => Column::exact(widths.get(col.key()).copied().unwrap_or(initial).max(col.min_width())),
         })
         .collect()
 }
@@ -47,7 +53,8 @@ pub fn dividers<C: TableCol>(ui: &mut Ui, salt: &str, cols: &[C], cells: &[Rect]
     let spacing = ui.spacing().item_spacing.y;
     let bottom = (header.bottom() + rows as f32 * (row_height + spacing)).min(ui.min_rect().bottom());
     let id = state_id(salt);
-    let mut widths: Widths<C> = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    let mut widths = load(ui, id);
+    let mut changed = false;
     let grab = ui.style().interaction.resize_grab_radius_side;
     let dragging_something_else = ui.input(|i| i.pointer.any_down() || i.pointer.any_pressed());
 
@@ -69,11 +76,12 @@ pub fn dividers<C: TableCol>(ui: &mut Ui, salt: &str, cols: &[C], cells: &[Rect]
             if delta != 0.0 {
                 // A coluna de sobra não guarda largura: ela recebe a diferença sozinha.
                 if left.initial_width().is_some() {
-                    widths.insert(left, w_left + delta);
+                    widths.insert(left.key().to_owned(), w_left + delta);
                 }
                 if right.initial_width().is_some() {
-                    widths.insert(right, w_right - delta);
+                    widths.insert(right.key().to_owned(), w_right - delta);
                 }
+                changed = true;
                 ui.ctx().request_repaint();
             }
         }
@@ -93,7 +101,9 @@ pub fn dividers<C: TableCol>(ui: &mut Ui, salt: &str, cols: &[C], cells: &[Rect]
         ui.painter().line_segment([pos2(x, top), pos2(x, bottom)], stroke);
     }
 
-    ui.data_mut(|d| d.insert_temp(id, widths));
+    if changed {
+        ui.data_mut(|d| d.insert_persisted(id, widths));
+    }
 }
 
 #[cfg(test)]
@@ -103,7 +113,7 @@ mod tests {
     use egui_extras::TableBuilder;
 
     /// Nome à esquerda, como nas tabelas do app: foi aí que a coluna crescia ao contrário.
-    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    #[derive(Clone, Copy, Debug)]
     enum C {
         Name,
         A,
@@ -111,6 +121,14 @@ mod tests {
     }
 
     impl TableCol for C {
+        fn key(self) -> &'static str {
+            match self {
+                C::Name => "name",
+                C::A => "a",
+                C::B => "b",
+            }
+        }
+
         fn initial_width(self) -> Option<f32> {
             match self {
                 C::Name => None,

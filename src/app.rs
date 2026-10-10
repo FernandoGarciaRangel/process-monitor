@@ -27,6 +27,33 @@ pub enum View {
     Gpu(usize),
 }
 
+impl View {
+    /// Nome estável, guardado entre execuções.
+    fn key(self) -> String {
+        match self {
+            View::Processes => "processes".to_owned(),
+            View::Ports => "ports".to_owned(),
+            View::Cpu => "cpu".to_owned(),
+            View::Memory => "memory".to_owned(),
+            View::Disk => "disk".to_owned(),
+            View::Network => "network".to_owned(),
+            View::Gpu(i) => format!("gpu:{i}"),
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "processes" => View::Processes,
+            "ports" => View::Ports,
+            "cpu" => View::Cpu,
+            "memory" => View::Memory,
+            "disk" => View::Disk,
+            "network" => View::Network,
+            _ => View::Gpu(key.strip_prefix("gpu:")?.parse().ok()?),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortKey {
     Name,
@@ -38,6 +65,23 @@ pub enum SortKey {
     Gpu,
 }
 
+impl SortKey {
+    const ALL: [SortKey; 7] =
+        [SortKey::Name, SortKey::Pid, SortKey::User, SortKey::Cpu, SortKey::Memory, SortKey::Disk, SortKey::Gpu];
+
+    fn key(self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::Pid => "pid",
+            SortKey::User => "user",
+            SortKey::Cpu => "cpu",
+            SortKey::Memory => "memory",
+            SortKey::Disk => "disk",
+            SortKey::Gpu => "gpu",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortSort {
     Port,
@@ -46,6 +90,22 @@ pub enum PortSort {
     Response,
     Memory,
     Uptime,
+}
+
+impl PortSort {
+    const ALL: [PortSort; 6] =
+        [PortSort::Port, PortSort::Name, PortSort::Pid, PortSort::Response, PortSort::Memory, PortSort::Uptime];
+
+    fn key(self) -> &'static str {
+        match self {
+            PortSort::Port => "port",
+            PortSort::Name => "name",
+            PortSort::Pid => "pid",
+            PortSort::Response => "response",
+            PortSort::Memory => "memory",
+            PortSort::Uptime => "uptime",
+        }
+    }
 }
 
 /// Pedido de finalização aguardando confirmação no modal.
@@ -148,6 +208,11 @@ const GROUP_KEY: &str = "group";
 const PORT_RANGES_KEY: &str = "port_ranges";
 const PORTS_ALL_KEY: &str = "ports_all";
 const AUTO_UPDATE_KEY: &str = "auto_update";
+const VIEW_KEY: &str = "view";
+const SORT_KEY: &str = "sort";
+const SORT_DESC_KEY: &str = "sort_desc";
+const PORT_SORT_KEY: &str = "port_sort";
+const PORT_SORT_DESC_KEY: &str = "port_sort_desc";
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -163,15 +228,21 @@ impl App {
             .unwrap_or_else(|| ports::DEFAULT_RANGES.to_owned());
         // Ligado por padrão: só baixa; instalar continua sendo decisão do usuário.
         let auto_update = stored(AUTO_UPDATE_KEY).is_none_or(|v| v == "1");
+        // A GPU salva pode não existir mais (placa trocada): `logic` confere no primeiro
+        // snapshot e volta para os processos.
+        let view = stored(VIEW_KEY).and_then(|v| View::from_key(&v)).unwrap_or(View::Processes);
+        let sort = stored(SORT_KEY).and_then(|v| SortKey::ALL.into_iter().find(|k| k.key() == v)).unwrap_or(SortKey::Cpu);
+        let port_sort =
+            stored(PORT_SORT_KEY).and_then(|v| PortSort::ALL.into_iter().find(|k| k.key() == v)).unwrap_or(PortSort::Port);
         Self {
             sampler: Sampler::spawn(cc.egui_ctx.clone(), Duration::from_millis(interval_ms)),
             snap: None,
-            view: View::Processes,
+            view,
             search: String::new(),
             group,
             expanded: HashSet::new(),
-            sort: SortKey::Cpu,
-            sort_desc: true,
+            sort,
+            sort_desc: stored(SORT_DESC_KEY).is_none_or(|v| v == "1"),
             selected: None,
             scroll_to_selected: false,
             prev_rank: HashMap::new(),
@@ -189,8 +260,8 @@ impl App {
             port_ranges_text,
             ports_all: stored(PORTS_ALL_KEY).is_some_and(|v| v == "1"),
             port_search: String::new(),
-            port_sort: PortSort::Port,
-            port_sort_desc: false,
+            port_sort,
+            port_sort_desc: stored(PORT_SORT_DESC_KEY).is_some_and(|v| v == "1"),
             selected_port: None,
             scroll_to_port: false,
             dev_port_count: 0,
@@ -539,6 +610,11 @@ impl eframe::App for App {
                 let alive: HashSet<ProcKey> = latest.processes.iter().map(|p| p.key()).collect();
                 self.protected_cache.retain(|k, _| alive.contains(k));
             }
+            if let View::Gpu(i) = self.view
+                && i >= latest.gpus.len()
+            {
+                self.view = View::Processes;
+            }
             self.snap = Some(latest);
             self.track_selected();
             self.sync_ports();
@@ -607,6 +683,11 @@ impl eframe::App for App {
         }
         storage.set_string(PORTS_ALL_KEY, if self.ports_all { "1" } else { "0" }.to_owned());
         storage.set_string(AUTO_UPDATE_KEY, if self.auto_update { "1" } else { "0" }.to_owned());
+        storage.set_string(VIEW_KEY, self.view.key());
+        storage.set_string(SORT_KEY, self.sort.key().to_owned());
+        storage.set_string(SORT_DESC_KEY, if self.sort_desc { "1" } else { "0" }.to_owned());
+        storage.set_string(PORT_SORT_KEY, self.port_sort.key().to_owned());
+        storage.set_string(PORT_SORT_DESC_KEY, if self.port_sort_desc { "1" } else { "0" }.to_owned());
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -663,4 +744,24 @@ fn loading(ui: &mut egui::Ui) {
 pub fn hairline(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, HAIRLINE));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferencias_salvas_voltam_iguais() {
+        for view in [View::Processes, View::Ports, View::Cpu, View::Memory, View::Disk, View::Network, View::Gpu(1)] {
+            assert_eq!(View::from_key(&view.key()), Some(view));
+        }
+        assert_eq!(View::from_key("gpu:x"), None);
+        assert_eq!(View::from_key(""), None);
+        for key in SortKey::ALL {
+            assert_eq!(SortKey::ALL.into_iter().find(|k| k.key() == key.key()), Some(key));
+        }
+        for key in PortSort::ALL {
+            assert_eq!(PortSort::ALL.into_iter().find(|k| k.key() == key.key()), Some(key));
+        }
+    }
 }

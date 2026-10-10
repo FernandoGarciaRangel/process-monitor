@@ -17,7 +17,7 @@ use crate::ui::widgets;
 const ROW_HEIGHT: f32 = 30.0;
 const HEADER_HEIGHT: f32 = 42.0;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Col {
     Name,
     Pid,
@@ -60,6 +60,18 @@ impl Col {
 }
 
 impl TableCol for Col {
+    fn key(self) -> &'static str {
+        match self {
+            Col::Name => "name",
+            Col::Pid => "pid",
+            Col::User => "user",
+            Col::Cpu => "cpu",
+            Col::Memory => "memory",
+            Col::Disk => "disk",
+            Col::Gpu => "gpu",
+        }
+    }
+
     fn initial_width(self) -> Option<f32> {
         match self {
             Col::Name => None,

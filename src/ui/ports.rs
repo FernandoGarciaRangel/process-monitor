@@ -71,7 +71,7 @@ impl Row<'_> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Col {
     Port,
     Name,
@@ -116,6 +116,19 @@ impl Col {
 }
 
 impl TableCol for Col {
+    fn key(self) -> &'static str {
+        match self {
+            Col::Port => "port",
+            Col::Name => "name",
+            Col::Address => "address",
+            Col::Pid => "pid",
+            Col::Response => "response",
+            Col::Latency => "latency",
+            Col::Memory => "memory",
+            Col::Uptime => "uptime",
+        }
+    }
+
     fn initial_width(self) -> Option<f32> {
         match self {
             Col::Port => Some(76.0),
