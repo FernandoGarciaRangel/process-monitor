@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui::{Align, Align2, Color32, CornerRadius, Key, Layout, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
-use egui_extras::{Column, TableBuilder};
+use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 
 use crate::app::{App, PortSort, View};
@@ -18,6 +18,7 @@ use crate::platform;
 use crate::ports::{self, Kind, Listener, PortRange, PortStatus, Reply, Statuses};
 use crate::sampler::{ProcInfo, ProcKey, Snapshot};
 use crate::theme::{self, GRAPHITE_3, HAIRLINE, HAIRLINE_STRONG, INK, INK_2, INK_3, INK_4, NETWORK, R_SM};
+use crate::ui::columns::{self, TableCol};
 use crate::ui::processes::{MB, band, mem_heat, search_terms};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
@@ -70,7 +71,7 @@ impl Row<'_> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Col {
     Port,
     Name,
@@ -112,17 +113,28 @@ impl Col {
         matches!(self, Col::Pid | Col::Memory | Col::Uptime)
     }
 
-    fn column(self) -> Column {
+}
+
+impl TableCol for Col {
+    fn initial_width(self) -> Option<f32> {
         match self {
-            Col::Port => Column::initial(76.0).at_least(64.0).clip(true),
-            // Nome não tem divisória própria: absorve o que as outras ganham ou perdem.
-            Col::Name => Column::remainder().at_least(200.0).clip(true).resizable(false),
-            Col::Address => Column::initial(120.0).at_least(60.0).clip(true),
-            Col::Pid => Column::initial(64.0).at_least(48.0).clip(true),
-            Col::Response => Column::initial(118.0).at_least(70.0).clip(true),
-            Col::Latency => Column::initial(92.0).at_least(60.0).clip(true),
-            Col::Memory => Column::initial(88.0).at_least(64.0).clip(true),
-            Col::Uptime => Column::initial(88.0).at_least(64.0).clip(true),
+            Col::Port => Some(76.0),
+            Col::Name => None,
+            Col::Address => Some(120.0),
+            Col::Pid => Some(64.0),
+            Col::Response => Some(118.0),
+            Col::Latency => Some(92.0),
+            Col::Memory | Col::Uptime => Some(88.0),
+        }
+    }
+
+    fn min_width(self) -> f32 {
+        match self {
+            Col::Port | Col::Memory | Col::Uptime => 64.0,
+            Col::Name => 200.0,
+            Col::Address | Col::Latency => 60.0,
+            Col::Pid => 48.0,
+            Col::Response => 70.0,
         }
     }
 }
@@ -424,16 +436,17 @@ fn table(app: &mut App, ui: &mut Ui, snap: &Snapshot, rows: &[Row], actions: &mu
         None
     };
 
+    let mut header_cells = Vec::with_capacity(cols.len());
+    let table_columns = columns::columns(ui, "ports", &cols);
     let mut builder = TableBuilder::new(ui)
         .id_salt("ports")
         .striped(false)
-        .resizable(true)
         .sense(Sense::click())
         .cell_layout(Layout::left_to_right(Align::Center))
         .min_scrolled_height(0.0)
         .auto_shrink([false, false]);
-    for col in &cols {
-        builder = builder.column(col.column());
+    for column in table_columns {
+        builder = builder.column(column);
     }
     if let Some(row) = scroll_row {
         builder = builder.scroll_to_row(row, None);
@@ -442,7 +455,10 @@ fn table(app: &mut App, ui: &mut Ui, snap: &Snapshot, rows: &[Row], actions: &mu
     builder
         .header(HEADER_HEIGHT, |mut header| {
             for col in &cols {
-                header.col(|ui| header_cell(app, ui, *col));
+                header.col(|ui| {
+                    header_cells.push(ui.max_rect());
+                    header_cell(app, ui, *col);
+                });
             }
         })
         .body(|body| {
@@ -464,6 +480,7 @@ fn table(app: &mut App, ui: &mut Ui, snap: &Snapshot, rows: &[Row], actions: &mu
                 response.context_menu(|ui| port_menu(app, ui, r, actions));
             });
         });
+    columns::dividers(ui, "ports", &cols, &header_cells, rows.len(), ROW_HEIGHT);
 }
 
 fn header_cell(app: &mut App, ui: &mut Ui, col: Col) {

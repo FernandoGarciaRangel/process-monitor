@@ -1,3 +1,4 @@
+pub mod columns;
 pub mod details;
 pub mod performance;
 pub mod ports;

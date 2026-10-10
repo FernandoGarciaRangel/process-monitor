@@ -4,19 +4,20 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use egui::{Align, Align2, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, pos2, vec2};
-use egui_extras::{Column, TableBuilder};
+use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 
 use crate::app::{App, SortKey};
 use crate::format;
 use crate::sampler::{ProcInfo, ProcKey, Snapshot};
 use crate::theme::{self, HAIRLINE, INK, INK_2, INK_3, INK_4, R_SM};
+use crate::ui::columns::{self, TableCol};
 use crate::ui::widgets;
 
 const ROW_HEIGHT: f32 = 30.0;
 const HEADER_HEIGHT: f32 = 42.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Col {
     Name,
     Pid,
@@ -56,15 +57,28 @@ impl Col {
         !matches!(self, Col::Name | Col::User)
     }
 
-    fn column(self) -> Column {
+}
+
+impl TableCol for Col {
+    fn initial_width(self) -> Option<f32> {
         match self {
-            Col::Name => Column::remainder().at_least(170.0).clip(true).resizable(false),
-            Col::Pid => Column::initial(66.0).at_least(48.0).clip(true),
-            Col::User => Column::initial(118.0).at_least(60.0).clip(true),
-            Col::Cpu => Column::initial(74.0).at_least(56.0).clip(true),
-            Col::Memory => Column::initial(92.0).at_least(64.0).clip(true),
-            Col::Disk => Column::initial(88.0).at_least(64.0).clip(true),
-            Col::Gpu => Column::initial(66.0).at_least(48.0).clip(true),
+            Col::Name => None,
+            Col::Pid => Some(66.0),
+            Col::User => Some(118.0),
+            Col::Cpu => Some(74.0),
+            Col::Memory => Some(92.0),
+            Col::Disk => Some(88.0),
+            Col::Gpu => Some(66.0),
+        }
+    }
+
+    fn min_width(self) -> f32 {
+        match self {
+            Col::Name => 170.0,
+            Col::Pid | Col::Gpu => 48.0,
+            Col::User => 60.0,
+            Col::Cpu => 56.0,
+            Col::Memory | Col::Disk => 64.0,
         }
     }
 }
@@ -141,17 +155,17 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
         None
     };
 
+    let mut header_cells = Vec::with_capacity(cols.len());
+    let table_columns = columns::columns(ui, "processes", &cols);
     let mut table = TableBuilder::new(ui)
         .id_salt("processes")
         .striped(false)
-        // Arrastar a divisória à direita de uma coluna muda a largura dela; Nome absorve a diferença.
-        .resizable(true)
         .sense(Sense::click())
         .cell_layout(Layout::left_to_right(Align::Center))
         .min_scrolled_height(0.0)
         .auto_shrink([false, false]);
-    for col in &cols {
-        table = table.column(col.column());
+    for column in table_columns {
+        table = table.column(column);
     }
     if let Some(row) = scroll_row {
         table = table.scroll_to_row(row, None);
@@ -160,7 +174,10 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
     table
         .header(HEADER_HEIGHT, |mut header| {
             for col in &cols {
-                header.col(|ui| header_cell(app, ui, snap, *col));
+                header.col(|ui| {
+                    header_cells.push(ui.max_rect());
+                    header_cell(app, ui, snap, *col);
+                });
             }
         })
         .body(|body| {
@@ -191,6 +208,7 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
                 }
             });
         });
+    columns::dividers(ui, "processes", &cols, &header_cells, rows.len(), ROW_HEIGHT);
 
     for action in actions {
         match action {
