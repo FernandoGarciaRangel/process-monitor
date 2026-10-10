@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, NO_ERROR};
 use windows::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
-    TCP_TABLE_OWNER_PID_LISTENER,
+    TCP_TABLE_CLASS, TCP_TABLE_OWNER_PID_CONNECTIONS, TCP_TABLE_OWNER_PID_LISTENER,
 };
 
 use crate::sampler::{ProcInfo, Series};
@@ -93,14 +93,13 @@ pub fn listeners() -> Vec<Listener> {
             addrs.push(ip);
         }
     };
-    if let Some(buf) = tcp_table(AF_INET) {
+    if let Some(buf) = tcp_table(AF_INET, TCP_TABLE_OWNER_PID_LISTENER) {
         let offset = std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table);
         for row in unsafe { table_rows::<MIB_TCPROW_OWNER_PID>(&buf, offset) } {
-            // O endereço está na ordem da rede: os bytes na memória já são os octetos.
-            add(port_of(row.dwLocalPort), row.dwOwningPid, IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes())));
+            add(port_of(row.dwLocalPort), row.dwOwningPid, ipv4_of(row.dwLocalAddr));
         }
     }
-    if let Some(buf) = tcp_table(AF_INET6) {
+    if let Some(buf) = tcp_table(AF_INET6, TCP_TABLE_OWNER_PID_LISTENER) {
         let offset = std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table);
         for row in unsafe { table_rows::<MIB_TCP6ROW_OWNER_PID>(&buf, offset) } {
             add(port_of(row.dwLocalPort), row.dwOwningPid, IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)));
@@ -109,19 +108,110 @@ pub fn listeners() -> Vec<Listener> {
     by_key.into_iter().map(|((port, pid), addrs)| Listener { port, pid, addrs }).collect()
 }
 
+/// Estado de uma conexão TCP, como o IP Helper devolve (`MIB_TCP_STATE`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TcpState {
+    SynSent,
+    SynReceived,
+    Established,
+    /// Este lado já fechou e espera o outro (FIN_WAIT_1/2, CLOSING, LAST_ACK).
+    Closing,
+    /// O outro lado fechou e este processo ainda não: muitas indicam vazamento de socket.
+    CloseWait,
+    TimeWait,
+    Other,
+}
+
+impl TcpState {
+    fn from_raw(raw: u32) -> Self {
+        match raw {
+            3 => TcpState::SynSent,
+            4 => TcpState::SynReceived,
+            5 => TcpState::Established,
+            6 | 7 | 9 | 10 => TcpState::Closing,
+            8 => TcpState::CloseWait,
+            11 => TcpState::TimeWait,
+            _ => TcpState::Other,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TcpState::SynSent => "Conectando",
+            TcpState::SynReceived => "Aceitando",
+            TcpState::Established => "Estabelecida",
+            TcpState::Closing => "Fechando",
+            TcpState::CloseWait => "Aguardando fechamento",
+            TcpState::TimeWait => "Encerrada há pouco",
+            TcpState::Other => "—",
+        }
+    }
+}
+
+/// Uma conexão TCP que não é de escuta, com o processo dono.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Connection {
+    pub pid: u32,
+    pub local: SocketAddr,
+    pub remote: SocketAddr,
+    pub state: TcpState,
+}
+
+/// Linha 2 (LISTEN) já aparece em [`listeners`]; 1 (CLOSED) e 12 (DELETE_TCB) não interessam.
+fn is_connection(state: u32) -> bool {
+    !matches!(state, 1 | 2 | 12)
+}
+
+/// Conexões TCP de todos os processos (IPv4 e IPv6), sem as portas em escuta.
+pub fn connections() -> Vec<Connection> {
+    let mut out = Vec::new();
+    if let Some(buf) = tcp_table(AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS) {
+        let offset = std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table);
+        for row in unsafe { table_rows::<MIB_TCPROW_OWNER_PID>(&buf, offset) } {
+            if is_connection(row.dwState) {
+                out.push(Connection {
+                    pid: row.dwOwningPid,
+                    local: SocketAddr::new(ipv4_of(row.dwLocalAddr), port_of(row.dwLocalPort)),
+                    remote: SocketAddr::new(ipv4_of(row.dwRemoteAddr), port_of(row.dwRemotePort)),
+                    state: TcpState::from_raw(row.dwState),
+                });
+            }
+        }
+    }
+    if let Some(buf) = tcp_table(AF_INET6, TCP_TABLE_OWNER_PID_CONNECTIONS) {
+        let offset = std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table);
+        for row in unsafe { table_rows::<MIB_TCP6ROW_OWNER_PID>(&buf, offset) } {
+            if is_connection(row.dwState) {
+                out.push(Connection {
+                    pid: row.dwOwningPid,
+                    local: SocketAddr::new(IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)), port_of(row.dwLocalPort)),
+                    remote: SocketAddr::new(IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr)), port_of(row.dwRemotePort)),
+                    state: TcpState::from_raw(row.dwState),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// O endereço está na ordem da rede: os bytes na memória já são os octetos.
+fn ipv4_of(raw: u32) -> IpAddr {
+    IpAddr::V4(Ipv4Addr::from(raw.to_ne_bytes()))
+}
+
 /// A porta vem na ordem da rede, nos 16 bits de baixo.
 fn port_of(raw: u32) -> u16 {
     u16::from_be(raw as u16)
 }
 
-/// Tabela de escuta de uma família de endereços. Buffer de `u32` para ficar alinhado.
-fn tcp_table(family: u32) -> Option<Vec<u32>> {
+/// Tabela TCP de uma família de endereços. Buffer de `u32` para ficar alinhado.
+fn tcp_table(family: u32, class: TCP_TABLE_CLASS) -> Option<Vec<u32>> {
     let mut buf = vec![0u32; 2048];
     // A tabela pode crescer entre a consulta do tamanho e a leitura: tenta de novo.
     for _ in 0..4 {
         let mut size = (buf.len() * 4) as u32;
         let ret = unsafe {
-            GetExtendedTcpTable(Some(buf.as_mut_ptr().cast()), &mut size, false, family, TCP_TABLE_OWNER_PID_LISTENER, 0)
+            GetExtendedTcpTable(Some(buf.as_mut_ptr().cast()), &mut size, false, family, class, 0)
         };
         if ret == NO_ERROR.0 {
             return Some(buf);
@@ -807,6 +897,23 @@ mod tests {
         let found = listeners().into_iter().find(|l| l.port == port).expect("porta aberta pelo teste");
         assert_eq!(found.pid, std::process::id());
         assert_eq!(found.addrs, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    }
+
+    #[test]
+    fn le_as_proprias_conexoes() {
+        let server = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = server.local_addr().unwrap();
+        let client = TcpStream::connect(addr).expect("connect");
+        let (_accepted, _) = server.accept().expect("accept");
+        let local = client.local_addr().unwrap();
+        let all = connections();
+        let me = std::process::id();
+        // As duas pontas são deste processo: a do cliente e a aceita pelo servidor.
+        let out = all.iter().find(|c| c.local == local).expect("ponta do cliente");
+        assert_eq!((out.pid, out.remote, out.state), (me, addr, TcpState::Established));
+        let back = all.iter().find(|c| c.local == addr && c.remote == local).expect("ponta do servidor");
+        assert_eq!(back.pid, me);
+        assert!(all.iter().all(|c| c.local != addr || c.remote.port() != 0), "porta em escuta não é conexão");
     }
 
     #[test]

@@ -5,8 +5,8 @@ use egui_phosphor::regular as icon;
 
 use crate::app::{self, App, HistorySpan, View};
 use crate::format;
-use crate::ports::{Listener, Reply};
-use crate::sampler::{ProcKey, Series};
+use crate::ports::{Connection, Listener, Reply, TcpState};
+use crate::sampler::{ProcKey, Series, Snapshot};
 use crate::theme::{self, ACCENT, CPU, HAIRLINE, INK, INK_2, INK_3, MEMORY, R_SM, WELL};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
@@ -71,6 +71,14 @@ fn body(app: &mut App, ui: &mut Ui) {
             let listening: Vec<&Listener> = snap.listeners.iter().filter(|l| l.pid == p.pid).collect();
             if !listening.is_empty() {
                 ports_section(app, ui, key, &listening);
+                ui.add_space(18.0);
+            }
+
+            let mut conns: Vec<&Connection> = snap.connections.iter().filter(|c| c.pid == p.pid).collect();
+            if !conns.is_empty() {
+                // Estabelecidas primeiro; dentro do estado, pelo endereço remoto.
+                conns.sort_by_key(|c| (c.state != TcpState::Established, c.remote));
+                connections_section(app, ui, &snap, &conns);
                 ui.add_space(18.0);
             }
 
@@ -309,6 +317,54 @@ fn ports_section(app: &mut App, ui: &mut Ui, key: ProcKey, listening: &[&Listene
     }
     if listening.len() > MAX {
         ui.label(RichText::new(format!("e mais {}", listening.len() - MAX)).color(INK_3).font(theme::regular(12.0)));
+    }
+}
+
+/// Conexões TCP do processo. Uma conexão local para uma porta em escuta mostra o
+/// processo do outro lado ("→ uvicorn"), que leva a ele com um clique.
+fn connections_section(app: &mut App, ui: &mut Ui, snap: &Snapshot, conns: &[&Connection]) {
+    const MAX: usize = 12;
+    widgets::section_label(ui, &format!("Conexões · {}", conns.len()));
+    ui.add_space(4.0);
+    let mut chosen: Option<ProcKey> = None;
+    for c in conns.iter().take(MAX) {
+        let peer = c
+            .remote
+            .ip()
+            .is_loopback()
+            .then(|| snap.listeners.iter().find(|l| l.port == c.remote.port()))
+            .flatten()
+            .and_then(|l| snap.processes.iter().find(|pp| pp.pid == l.pid));
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                if widgets::icon_button(ui, icon::COPY, "Copiar endereço remoto").clicked() {
+                    ui.ctx().copy_text(c.remote.to_string());
+                }
+                let state_color = if c.state == TcpState::Established { INK_3 } else { theme::INK_4 };
+                ui.label(RichText::new(c.state.label()).font(theme::regular(11.5)).color(state_color));
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(c.remote.to_string()).font(theme::mono(12.0)).color(INK_2)).truncate());
+                    if let Some(pp) = peer {
+                        let link = egui::Button::new(
+                            RichText::new(format!("→ {}", pp.display_name())).font(theme::regular(12.0)).color(ACCENT),
+                        )
+                        .frame(false)
+                        .truncate();
+                        if ui.add(link).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Ver o processo").clicked() {
+                            chosen = Some(pp.key());
+                        }
+                    }
+                });
+            });
+        });
+    }
+    if conns.len() > MAX {
+        ui.label(RichText::new(format!("e mais {}", conns.len() - MAX)).color(INK_3).font(theme::regular(12.0)));
+    }
+    if chosen.is_some() {
+        app.select(chosen);
+        app.scroll_to_selected = true;
     }
 }
 
