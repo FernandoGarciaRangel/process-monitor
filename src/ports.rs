@@ -319,6 +319,29 @@ pub fn likely_http(kind: Kind, cmd: &str) -> bool {
     !cmd.contains("ipykernel") && PYTHON_HTTP_HINTS.iter().any(|h| cmd.contains(h))
 }
 
+/// Processo que reiniciar para trazer de volta o servidor de `p`: sobe pelos pais
+/// enquanto forem de desenvolvimento, atravessando o `cmd.exe` que o npm usa entre ele
+/// e o Vite (`npm run dev` → `cmd /c vite` → `node vite`). Para no shell ou terminal
+/// do usuário, que não pode ser finalizado junto.
+pub fn server_root<'a>(p: &'a ProcInfo, parent_of: impl Fn(&ProcInfo) -> Option<&'a ProcInfo>) -> &'a ProcInfo {
+    let mut root = p;
+    // O limite só protege de um laço de PIDs; uma cadeia real tem 3 ou 4 níveis.
+    for _ in 0..16 {
+        let Some(parent) = parent_of(root) else { break };
+        if classify(parent).is_some() {
+            root = parent;
+        } else if parent.name.eq_ignore_ascii_case("cmd.exe")
+            && let Some(grand) = parent_of(parent)
+            && classify(grand).is_some()
+        {
+            root = grand;
+        } else {
+            break;
+        }
+    }
+    root
+}
+
 /// Pastas que marcam o fim do caminho do projeto.
 const PROJECT_MARKERS: &[&str] =
     &["\\node_modules\\", "\\.venv\\", "\\venv\\", "\\bin\\debug\\", "\\bin\\release\\", "\\target\\debug\\", "\\target\\release\\"];
@@ -897,6 +920,45 @@ mod tests {
         let found = listeners().into_iter().find(|l| l.port == port).expect("porta aberta pelo teste");
         assert_eq!(found.pid, std::process::id());
         assert_eq!(found.addrs, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    }
+
+    /// O mesmo critério de `Snapshot::parent_of`.
+    fn parent_in<'a>(procs: &'a [ProcInfo], child: &ProcInfo) -> Option<&'a ProcInfo> {
+        procs.iter().find(|p| Some(p.pid) == child.parent && p.start_time <= child.start_time)
+    }
+
+    fn with_cmd(mut p: ProcInfo, cmd: &str) -> ProcInfo {
+        p.cmd = cmd.to_owned();
+        p
+    }
+
+    #[test]
+    fn raiz_do_servidor() {
+        // pwsh → node (npm run dev) → cmd /c vite → node (vite, dono da porta).
+        let npm = vec![
+            proc(1, None, 10, "pwsh.exe"),
+            with_cmd(proc(2, Some(1), 11, "node.exe"), r#""C:
+odejs
+ode.exe" npm-cli.js run dev"#),
+            proc(3, Some(2), 12, "cmd.exe"),
+            with_cmd(proc(4, Some(3), 13, "node.exe"), r"node D:pp
+ode_modulesiteinite.js"),
+        ];
+        assert_eq!(server_root(&npm[3], |c| parent_in(&npm, c)).pid, 2);
+
+        // pwsh → python -m uvicorn (sem reload): ele mesmo.
+        let uvicorn = vec![proc(1, None, 10, "pwsh.exe"), with_cmd(proc(2, Some(1), 11, "python.exe"), "python -m uvicorn main:app")];
+        assert_eq!(server_root(&uvicorn[1], |c| parent_in(&uvicorn, c)).pid, 2);
+
+        // uvicorn --reload: o worker escuta, o reloader é o pai.
+        let reload = vec![
+            proc(1, None, 10, "WindowsTerminal.exe"),
+            proc(2, Some(1), 11, "cmd.exe"),
+            with_cmd(proc(3, Some(2), 12, "python.exe"), "python -m uvicorn main:app --reload"),
+            with_cmd(proc(4, Some(3), 13, "python.exe"), "python -c from multiprocessing.spawn import spawn_main"),
+        ];
+        // O cmd.exe do usuário (filho do terminal) não entra.
+        assert_eq!(server_root(&reload[3], |c| parent_in(&reload, c)).pid, 3);
     }
 
     #[test]

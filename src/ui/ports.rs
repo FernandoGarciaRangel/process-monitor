@@ -157,6 +157,7 @@ enum Action {
     Open(String),
     Copy(String),
     Kill(ProcKey, u16),
+    Restart(ProcKey, u16),
     Explore(PathBuf),
     ShowProcess(ProcKey),
     ShowAll,
@@ -195,6 +196,7 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
             Action::Open(url) => platform::shell_open(&url),
             Action::Copy(text) => ui.ctx().copy_text(text),
             Action::Kill(key, port) => app.request_kill_port(key, port),
+            Action::Restart(key, port) => app.request_restart(key, port),
             Action::Explore(dir) => platform::shell_open(&dir.display().to_string()),
             Action::ShowProcess(key) => {
                 app.view = View::Processes;
@@ -699,6 +701,18 @@ fn port_menu(app: &mut App, ui: &mut Ui, r: &Row, actions: &mut Vec<Action>) {
     }
     if protected {
         ui.label(RichText::new("Processo crítico do sistema").font(theme::regular(11.5)).color(INK_3));
+    }
+    let restart = app.restart_target(p.key());
+    let button = ui
+        .add_enabled(restart.is_ok(), egui::Button::new(format!("{}  Reiniciar servidor", icon::ARROW_CLOCKWISE)))
+        .on_hover_text("Finaliza e roda o mesmo comando numa janela de terminal nova");
+    let button = match restart {
+        Err(reason) => button.on_disabled_hover_text(reason),
+        Ok(_) => button,
+    };
+    if button.clicked() {
+        actions.push(Action::Restart(p.key(), r.l.port));
+        ui.close();
     }
     ui.separator();
     if let Some(dir) = &r.dir

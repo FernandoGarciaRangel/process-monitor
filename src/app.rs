@@ -1,7 +1,7 @@
 //! Estado do aplicativo e montagem da janela: barra lateral, conteúdo e detalhes.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Color32, CornerRadius, Frame, Id, Margin, RichText, Stroke, vec2};
@@ -116,7 +116,21 @@ pub struct KillRequest {
     pub detail: String,
     /// Alvos na ordem de execução (numa árvore, filhos antes dos pais).
     pub targets: Vec<KillTarget>,
+    /// Reiniciar: o servidor a abrir de novo depois de finalizar.
+    pub then: Option<Relaunch>,
 }
+
+/// Comando a rodar de novo, numa janela de terminal nova, depois que a porta liberar.
+#[derive(Clone, Debug)]
+pub struct Relaunch {
+    pub cmd: String,
+    pub cwd: std::path::PathBuf,
+    pub title: String,
+    pub port: u16,
+}
+
+/// Quanto esperar a porta liberar antes de abrir o servidor de novo.
+const RELAUNCH_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub struct KillTarget {
@@ -238,6 +252,9 @@ pub struct App {
     pub history_span: HistorySpan,
     pub confirm: Option<KillRequest>,
     pub toasts: Vec<Toast>,
+    /// Resultado dos reinícios, que rodam numa thread: nome do servidor ou o erro.
+    relaunch_tx: mpsc::Sender<Result<String, String>>,
+    relaunch_rx: mpsc::Receiver<Result<String, String>>,
     pub icons: IconCache,
     /// Janela "Quem está usando".
     pub locks: ui::locks::State,
@@ -337,6 +354,7 @@ impl App {
         let hidden_columns = stored(HIDDEN_COLUMNS_KEY)
             .map(|v| v.split(',').filter(|c| !c.is_empty()).map(str::to_owned).collect())
             .unwrap_or_default();
+        let (relaunch_tx, relaunch_rx) = mpsc::channel();
         Self {
             sampler: Sampler::spawn(
                 cc.egui_ctx.clone(),
@@ -362,6 +380,8 @@ impl App {
             },
             confirm: None,
             toasts: Vec::new(),
+            relaunch_tx,
+            relaunch_rx,
             icons: IconCache::new(cc.egui_ctx.clone()),
             locks: ui::locks::State::new(cc.egui_ctx.clone()),
             elevated: platform::is_elevated(),
@@ -600,24 +620,93 @@ impl App {
                     )
                 },
                 targets,
+                then: None,
             });
         } else {
             self.confirm = Some(KillRequest {
                 title: format!("Finalizar {label}?"),
                 detail: format!("O processo {exe} (PID {}) será encerrado imediatamente. Dados não salvos serão perdidos.", key.pid),
                 targets: vec![KillTarget::of(proc)],
+                then: None,
             });
         }
+    }
+
+    /// Nome do projeto do servidor, ou o nome do processo quando não é de desenvolvimento.
+    fn server_label(proc: &ProcInfo) -> String {
+        ports::classify(proc)
+            .and_then(|_| ports::project_dir(proc))
+            .and_then(|d| ports::project_label(&d))
+            .unwrap_or_else(|| proc.display_name().to_owned())
+    }
+
+    /// Processo a reiniciar para trazer de volta o servidor de `key`, ou por que não dá.
+    pub fn restart_target(&mut self, key: ProcKey) -> Result<ProcKey, &'static str> {
+        let snap = self.snap.clone().ok_or("Ainda lendo o sistema.")?;
+        let proc = snap.find(key).ok_or("O processo já encerrou.")?;
+        let root = ports::server_root(proc, |c| snap.parent_of(c));
+        if root.cmd.is_empty() || root.cwd.is_none() {
+            return Err("Sem acesso à linha de comando ou à pasta do processo. Execute como administrador.");
+        }
+        let (root_key, root_name) = (root.key(), root.name.clone());
+        if self.is_protected(root_key, &root_name) {
+            return Err("Processo crítico do sistema.");
+        }
+        Ok(root_key)
+    }
+
+    /// Reiniciar o servidor que escuta `port`: finaliza a árvore e roda o mesmo comando
+    /// numa janela de terminal nova, na mesma pasta.
+    pub fn request_restart(&mut self, key: ProcKey, port: u16) {
+        let root_key = match self.restart_target(key) {
+            Ok(k) => k,
+            Err(reason) => return self.toast(format!("Não dá para reiniciar: {reason}"), ToastKind::Error, false),
+        };
+        let Some(snap) = self.snap.clone() else { return };
+        let Some(root) = snap.find(root_key) else { return };
+        let Some(cwd) = root.cwd.clone() else { return };
+        let label = Self::server_label(snap.find(key).unwrap_or(root));
+        let targets: Vec<KillTarget> = snap.tree_postorder(root_key).into_iter().map(KillTarget::of).collect();
+        let tree = match targets.len().saturating_sub(1) {
+            0 => " será encerrado".to_owned(),
+            1 => " e 1 processo filho serão encerrados".to_owned(),
+            n => format!(" e {n} processos filhos serão encerrados"),
+        };
+        self.confirm = Some(KillRequest {
+            title: format!("Reiniciar {label}?"),
+            detail: format!(
+                "{} (PID {}){tree}, e o mesmo comando roda de novo numa janela de terminal nova, \
+                 em {}. O processo novo herda o ambiente do Process Monitor, não o do terminal original.\n\n{}",
+                root.name,
+                root.pid,
+                cwd.display(),
+                root.cmd
+            ),
+            targets,
+            then: Some(Relaunch { cmd: root.cmd.clone(), cwd, title: format!("{label} ({port})"), port }),
+        });
+    }
+
+    /// Espera a porta liberar e abre o servidor de novo, numa thread: a espera chega a segundos.
+    fn relaunch(&self, r: Relaunch) {
+        let tx = self.relaunch_tx.clone();
+        std::thread::Builder::new()
+            .name("relaunch".into())
+            .spawn(move || {
+                let deadline = Instant::now() + RELAUNCH_WAIT;
+                while ports::listeners().iter().any(|l| l.port == r.port) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+                let _ = tx.send(platform::spawn_in_console(&r.cmd, &r.cwd, &r.title).map(|()| r.title));
+            })
+            .expect("thread de reinício");
     }
 
     /// Finalizar o processo que escuta `port`, com a porta no texto da confirmação.
     pub fn request_kill_port(&mut self, key: ProcKey, port: u16) {
         let Some(snap) = self.snap.clone() else { return };
         let Some(proc) = snap.find(key) else { return };
-        let label = ports::classify(proc)
-            .and_then(|_| ports::project_dir(proc))
-            .and_then(|d| ports::project_label(&d))
-            .unwrap_or_else(|| proc.display_name().to_owned());
+        let label = Self::server_label(proc);
         let others = snap.listeners.iter().filter(|l| l.pid == key.pid && l.port != port).count();
         let also = match others {
             0 => String::new(),
@@ -631,6 +720,7 @@ impl App {
                 proc.name, key.pid
             ),
             targets: vec![KillTarget::of(proc)],
+            then: None,
         });
     }
 
@@ -643,6 +733,7 @@ impl App {
             title: format!("Finalizar todos os processos de {label}?"),
             detail: format!("{} processos {exe} serão encerrados. Dados não salvos serão perdidos.", targets.len()),
             targets,
+            then: None,
         });
     }
 
@@ -658,7 +749,12 @@ impl App {
                 Err(e) => errors.push((target.label.clone(), e)),
             }
         }
-        if errors.is_empty() {
+        if errors.is_empty()
+            && let Some(relaunch) = request.then.clone()
+        {
+            self.toast(format!("Reiniciando {}…", relaunch.title), ToastKind::Ok, false);
+            self.relaunch(relaunch);
+        } else if errors.is_empty() {
             let text = if total == 1 {
                 format!("{} finalizado", request.targets[0].label)
             } else {
@@ -738,7 +834,13 @@ impl App {
                 ui.label(RichText::new(&request.detail).font(theme::regular(13.0)).color(INK_2));
                 ui.add_space(18.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if request.targets.len() > 1 { "Finalizar todos" } else { "Finalizar" };
+                    let label = if request.then.is_some() {
+                        "Reiniciar"
+                    } else if request.targets.len() > 1 {
+                        "Finalizar todos"
+                    } else {
+                        "Finalizar"
+                    };
                     if widgets::danger_button(ui, label, true).clicked() {
                         decision = Some(true);
                     }
@@ -865,6 +967,12 @@ impl eframe::App for App {
         self.port_status = if self.probe_http { self.prober.latest() } else { Arc::default() };
         self.update_state = self.updater.latest();
         self.icons.poll(ctx);
+        while let Ok(result) = self.relaunch_rx.try_recv() {
+            match result {
+                Ok(title) => self.toast(format!("{title} reaberto numa janela de terminal"), ToastKind::Ok, false),
+                Err(e) => self.toast(format!("Não reabriu o servidor: {e}"), ToastKind::Error, false),
+            }
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

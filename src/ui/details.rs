@@ -283,6 +283,12 @@ fn ports_section(app: &mut App, ui: &mut Ui, key: ProcKey, listening: &[&Listene
     const MAX: usize = 12;
     widgets::section_label(ui, &format!("Portas em escuta · {}", listening.len()));
     ui.add_space(4.0);
+    // Só servidores de desenvolvimento ganham o botão: reiniciar o Chrome não faz sentido.
+    let restart = match app.snap.as_ref().and_then(|s| s.find(key)).and_then(crate::ports::classify) {
+        Some(_) => app.restart_target(key),
+        None => Err("não é servidor de desenvolvimento"),
+    };
+    let mut restart_port: Option<u16> = None;
     for l in listening.iter().take(MAX) {
         let reply = app.port_status.get(&(l.port, l.pid)).and_then(|s| s.reply);
         ui.horizontal(|ui| {
@@ -297,6 +303,11 @@ fn ports_section(app: &mut App, ui: &mut Ui, key: ProcKey, listening: &[&Listene
                 ui.spacing_mut().item_spacing.x = 2.0;
                 if widgets::icon_button(ui, icon::COPY, "Copiar URL").clicked() {
                     ui.ctx().copy_text(l.url());
+                }
+                if restart.is_ok()
+                    && widgets::icon_button(ui, icon::ARROW_CLOCKWISE, "Reiniciar servidor (abre num terminal novo)").clicked()
+                {
+                    restart_port = Some(l.port);
                 }
                 if matches!(reply, Some(Reply::Http { .. }))
                     && widgets::icon_button(ui, icon::ARROW_SQUARE_OUT, "Abrir no navegador").clicked()
@@ -317,6 +328,9 @@ fn ports_section(app: &mut App, ui: &mut Ui, key: ProcKey, listening: &[&Listene
     }
     if listening.len() > MAX {
         ui.label(RichText::new(format!("e mais {}", listening.len() - MAX)).color(INK_3).font(theme::regular(12.0)));
+    }
+    if let Some(port) = restart_port {
+        app.request_restart(key, port);
     }
 }
 

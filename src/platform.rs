@@ -298,6 +298,27 @@ pub fn shell_open(target: &str) {
     }
 }
 
+/// Roda `cmd` numa janela de console nova, em `cwd`, com `title` na barra. A janela
+/// fica aberta (`cmd /k`) se o servidor cair, para o erro continuar à vista.
+pub fn spawn_in_console(cmd: &str, cwd: &Path, title: &str) -> Result<(), String> {
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    std::process::Command::new("cmd.exe")
+        .raw_arg(console_args(cmd, title))
+        .current_dir(cwd)
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Argumentos do `cmd.exe`: `/k "title <título> & <comando>"`. Com `/k` seguido de aspas,
+/// o cmd tira só o primeiro e o último caractere, então as aspas do comando sobrevivem.
+fn console_args(cmd: &str, title: &str) -> String {
+    // No título, os caracteres especiais do cmd encerrariam o comando no meio.
+    let title: String = title.chars().filter(|c| !"&|<>^\"%()".contains(*c)).collect();
+    format!("/k \"title {} & {cmd}\"", title.trim())
+}
+
 /// Ícone grande (32 px) do executável em RGBA, ou `None` se o arquivo não tiver ícone.
 /// Precisa de COM inicializado na thread; chame [`init_com_for_icons`] antes.
 pub fn extract_icon(path: &Path) -> Option<([usize; 2], Vec<u8>)> {
@@ -557,6 +578,30 @@ mod tests {
         let name = account_name("S-1-5-18").expect("S-1-5-18 sempre resolve");
         assert!(name.to_uppercase().starts_with("SIS") || name.to_uppercase().starts_with("SYS"), "{name}");
         assert!(account_name("isto não é um SID").is_none());
+    }
+
+    #[test]
+    fn linha_do_console() {
+        assert_eq!(
+            console_args(r#""C:\nodejs\node.exe" npm-cli.js run dev"#, "web & api (5173)"),
+            r#"/k "title web  api 5173 & "C:\nodejs\node.exe" npm-cli.js run dev""#
+        );
+    }
+
+    #[test]
+    #[ignore = "abre uma janela de console; rode com cargo test console -- --ignored"]
+    fn console_novo_roda_no_diretorio() {
+        // `cmd /k` abriria uma janela que fica aberta; aqui o comando sai sozinho com `exit`.
+        let dir = std::env::temp_dir().join(format!("process-monitor-console-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("rodou.txt");
+        spawn_in_console("echo ok> rodou.txt & exit", &dir, "teste").expect("spawn");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(marker.exists(), "o comando deveria ter rodado em {dir:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
