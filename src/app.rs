@@ -14,6 +14,7 @@ use crate::sampler::{ProcInfo, ProcKey, Sampler, Series, Snapshot};
 use crate::theme::{self, GRAPHITE_0, GRAPHITE_3, HAIRLINE, HAIRLINE_STRONG, INK, INK_2, INK_3, R_LG, R_MD};
 use crate::ui;
 use crate::ui::widgets;
+use crate::updater::{self, Updater};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -133,12 +134,20 @@ pub struct App {
     pub dev_port_count: usize,
     port_targets: Vec<Target>,
     prober_active: bool,
+
+    pub updater: Updater,
+    pub update_state: Arc<updater::State>,
+    pub auto_update: bool,
+    /// O aviso de versão pronta foi dispensado nesta execução (continua nas configurações).
+    pub update_dismissed: bool,
+    pub settings_open: bool,
 }
 
 const INTERVAL_KEY: &str = "interval_ms";
 const GROUP_KEY: &str = "group";
 const PORT_RANGES_KEY: &str = "port_ranges";
 const PORTS_ALL_KEY: &str = "ports_all";
+const AUTO_UPDATE_KEY: &str = "auto_update";
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -152,6 +161,8 @@ impl App {
         let port_ranges_text = stored(PORT_RANGES_KEY)
             .filter(|t| ports::parse_ranges(t).is_ok())
             .unwrap_or_else(|| ports::DEFAULT_RANGES.to_owned());
+        // Ligado por padrão: só baixa; instalar continua sendo decisão do usuário.
+        let auto_update = stored(AUTO_UPDATE_KEY).is_none_or(|v| v == "1");
         Self {
             sampler: Sampler::spawn(cc.egui_ctx.clone(), Duration::from_millis(interval_ms)),
             snap: None,
@@ -185,12 +196,31 @@ impl App {
             dev_port_count: 0,
             port_targets: Vec::new(),
             prober_active: false,
+            updater: Updater::spawn(cc.egui_ctx.clone(), auto_update),
+            update_state: Arc::new(updater::State::Idle),
+            auto_update,
+            update_dismissed: false,
+            settings_open: false,
         }
     }
 
     pub fn set_interval(&mut self, ms: u64) {
         self.interval_ms = ms;
         self.sampler.set_interval(Duration::from_millis(ms));
+    }
+
+    pub fn set_auto_update(&mut self, on: bool) {
+        self.auto_update = on;
+        self.updater.set_auto(on);
+    }
+
+    /// Roda o instalador baixado e fecha o app; o instalador abre a versão nova.
+    pub fn install_update(&mut self, ctx: &egui::Context) {
+        let updater::State::Ready { installer, .. } = &*self.update_state else { return };
+        match updater::install(installer) {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(e) => self.toast(format!("Não abriu o instalador: {e}"), ToastKind::Error, false),
+        }
     }
 
     pub fn select(&mut self, key: Option<ProcKey>) {
@@ -435,15 +465,24 @@ impl App {
     fn toasts_ui(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         self.toasts.retain(|t| t.until > now);
-        if self.toasts.is_empty() {
+        let ready = match &*self.update_state {
+            updater::State::Ready { version, .. } if !self.update_dismissed => Some(*version),
+            _ => None,
+        };
+        if self.toasts.is_empty() && ready.is_none() {
             return;
         }
         let mut elevate = false;
         let mut dismiss: Option<usize> = None;
+        let mut update: Option<bool> = None;
         egui::Area::new(Id::new("toasts"))
             .anchor(Align2::RIGHT_BOTTOM, vec2(-18.0, -18.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
+                if let Some(version) = ready {
+                    update = update_notice(ui, version);
+                    ui.add_space(8.0);
+                }
                 for (i, toast) in self.toasts.iter().enumerate() {
                     let (glyph, color) = match toast.kind {
                         ToastKind::Ok => (icon::CHECK_CIRCLE, theme::OK),
@@ -479,6 +518,11 @@ impl App {
         if elevate {
             self.relaunch_elevated(ctx);
         }
+        match update {
+            Some(true) => self.install_update(ctx),
+            Some(false) => self.update_dismissed = true,
+            None => {}
+        }
         if let Some(next) = self.toasts.iter().map(|t| t.until).min() {
             ctx.request_repaint_after(next.saturating_duration_since(now));
         }
@@ -510,6 +554,7 @@ impl eframe::App for App {
             self.prober.set_active(ports_visible);
         }
         self.port_status = self.prober.latest();
+        self.update_state = self.updater.latest();
         self.icons.poll(ctx);
     }
 
@@ -546,6 +591,9 @@ impl eframe::App for App {
                 },
             });
 
+        if self.settings_open {
+            ui::settings::show(self, &ctx);
+        }
         self.confirm_modal(&ctx);
         self.toasts_ui(&ctx);
     }
@@ -558,11 +606,51 @@ impl eframe::App for App {
             storage.set_string(PORT_RANGES_KEY, self.port_ranges_text.clone());
         }
         storage.set_string(PORTS_ALL_KEY, if self.ports_all { "1" } else { "0" }.to_owned());
+        storage.set_string(AUTO_UPDATE_KEY, if self.auto_update { "1" } else { "0" }.to_owned());
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         GRAPHITE_0.to_normalized_gamma_f32()
     }
+}
+
+/// Aviso fixo de versão nova baixada. `Some(true)` = instalar, `Some(false)` = depois.
+fn update_notice(ui: &mut egui::Ui, version: updater::Version) -> Option<bool> {
+    let mut choice = None;
+    Frame::NONE
+        .fill(GRAPHITE_3)
+        .stroke(Stroke::new(1.0, HAIRLINE_STRONG))
+        .corner_radius(CornerRadius::same(R_MD))
+        .inner_margin(Margin::symmetric(14, 12))
+        .shadow(ui.visuals().popup_shadow)
+        .show(ui, |ui| {
+            ui.set_width(340.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon::ARROW_CIRCLE_UP).font(theme::regular(18.0)).color(theme::ACCENT));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(RichText::new(format!("Versão {version} pronta")).font(theme::semibold(13.5)).color(INK));
+                    ui.label(
+                        RichText::new("O app fecha, instala e abre de novo em alguns segundos.")
+                            .font(theme::regular(12.0))
+                            .color(INK_2),
+                    );
+                });
+            });
+            ui.add_space(10.0);
+            // Altura fixa: numa Area a altura disponível é a tela inteira, e o alinhamento
+            // ao centro esticaria o cartão até lá.
+            let row = vec2(ui.available_width(), 32.0);
+            ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::accent_button(ui, "Reiniciar e atualizar").clicked() {
+                    choice = Some(true);
+                }
+                if widgets::ghost_button(ui, "Depois").clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+    choice
 }
 
 fn loading(ui: &mut egui::Ui) {

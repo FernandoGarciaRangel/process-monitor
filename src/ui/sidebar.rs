@@ -10,7 +10,7 @@ use crate::theme::{self, ACCENT, CPU, DISK, GPU, GRAPHITE_1, GRAPHITE_2, INK, IN
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
-    brand(ui, app.snap.as_deref());
+    brand(app, ui);
     ui.add_space(14.0);
 
     let count = app.snap.as_ref().map(|s| s.processes.len()).unwrap_or(0);
@@ -117,7 +117,10 @@ fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
     }
 }
 
-fn brand(ui: &mut Ui, snap: Option<&Snapshot>) {
+fn brand(app: &mut App, ui: &mut Ui) {
+    let snap = app.snap.as_deref();
+    let update_ready = matches!(*app.update_state, crate::updater::State::Ready { .. });
+    let mut open_settings = false;
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
         logo_mark(ui, rect);
@@ -128,7 +131,20 @@ fn brand(ui: &mut Ui, snap: Option<&Snapshot>) {
             let host = snap.map(|s| s.host.as_str()).unwrap_or("");
             ui.label(RichText::new(host).font(theme::regular(11.5)).color(INK_3));
         });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let tip = if update_ready { "Configurações · atualização pronta" } else { "Configurações" };
+            let response = widgets::icon_button(ui, icon::GEAR_SIX, tip);
+            // Ponto laranja na engrenagem: há versão nova baixada.
+            if update_ready {
+                let dot = response.rect.right_top() + vec2(-6.0, 6.0);
+                ui.painter().circle_filled(dot, 3.5, ACCENT);
+            }
+            open_settings = response.clicked();
+        });
     });
+    if open_settings {
+        app.settings_open = true;
+    }
 }
 
 /// Marca desenhada: o traço de um sinal terminando no ponto luminoso dos gráficos.

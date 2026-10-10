@@ -10,6 +10,7 @@ mod ports;
 mod sampler;
 mod theme;
 mod ui;
+mod updater;
 
 fn main() -> eframe::Result {
     // Tamanho ideal 1240×780, mas nunca maior que a área útil da tela (notebooks com

@@ -209,6 +209,36 @@ pub fn danger_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
     ui.add_enabled(enabled, button)
 }
 
+/// Botão da ação principal, em laranja.
+pub fn accent_button(ui: &mut Ui, text: &str) -> Response {
+    ui.add(
+        egui::Button::new(RichText::new(text).color(Color32::BLACK).font(theme::semibold(13.0)))
+            .fill(theme::ACCENT)
+            .corner_radius(CornerRadius::same(R_SM))
+            .min_size(vec2(0.0, 32.0)),
+    )
+}
+
+/// Interruptor liga/desliga. `changed()` na resposta quando o clique troca o valor.
+pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
+    let (rect, mut response) = ui.allocate_exact_size(vec2(36.0, 20.0), Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *on, ""));
+    let t = ui.ctx().animate_bool_responsive(response.id, *on);
+    let painter = ui.painter();
+    let radius = CornerRadius::same(10);
+    painter.rect_filled(rect, radius, theme::lerp(theme::GRAPHITE_3, theme::ACCENT, t));
+    if t < 1.0 {
+        painter.rect_stroke(rect, radius, Stroke::new(1.0, theme::HAIRLINE_STRONG), egui::StrokeKind::Inside);
+    }
+    let x = egui::lerp((rect.left() + 10.0)..=(rect.right() - 10.0), t);
+    painter.circle_filled(pos2(x, rect.center().y), 7.0, theme::lerp(INK_2, Color32::WHITE, t));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Botão secundário discreto.
 pub fn ghost_button(ui: &mut Ui, text: &str) -> Response {
     ui.add(

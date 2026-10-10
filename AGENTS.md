@@ -128,6 +128,21 @@ detalhes de um processo com porta) aberta.
   A rodada de 2 s só abre e fecha a conexão TCP (`check`); o GET completo roda na
   primeira vez, quando a porta volta depois de cair e a cada `FULL_INTERVAL` (30 s).
 
+## Atualização automática
+
+`src/updater.rs`, numa thread própria, com WinHTTP (sem dependência nova). Lê a
+versão do redirecionamento de `github.com/<repo>/releases/latest` e baixa
+`ProcessMonitor-Setup-X.Y.Z.exe` da release `vX.Y.Z` para
+`%LOCALAPPDATA%\Process Monitor\updates`. Só instala quando o usuário clica.
+
+- 🔴 O nome do anexo e a tag são contrato: mudou o `OutputBaseFilename` do `.iss`
+  ou o padrão da tag, as versões já instaladas param de achar a atualização.
+- O app roda o instalador com `/VERYSILENT … /RELAUNCH=1` e fecha; o `[Code]` do
+  `.iss` lê `/RELAUNCH` e abre o app no fim. Sem isso, a instalação silenciosa não
+  reabre nada (`skipifsilent`).
+- Release sem token: o repositório tem que ser público para isso funcionar.
+- Teste de rede (ignorado por padrão): `cargo test updater -- --ignored`.
+
 ## Windows em português
 
 O Windows devolve nomes localizados: a conta `S-1-5-18` é "SISTEMA", as descrições
