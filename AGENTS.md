@@ -142,6 +142,9 @@ versão do redirecionamento de `github.com/<repo>/releases/latest` e baixa
   `.iss` lê `/RELAUNCH` e abre o app no fim. Sem isso, a instalação silenciosa não
   reabre nada (`skipifsilent`).
 - Release sem token: o repositório tem que ser público para isso funcionar.
+- O build de debug baixa para `%LOCALAPPDATA%\Process Monitor (dev)\updates`: ao abrir,
+  ele limpa instaladores de versão ≤ a do `Cargo.toml`, que no dev já é a nova, e
+  apagaria o que a versão instalada baixou.
 - Teste de rede (ignorado por padrão): `cargo test updater -- --ignored`.
 
 ## 🔴 Bandeja e instância única
@@ -162,6 +165,10 @@ e dos balões, e recebe o pedido de fechar do Windows.
   debug). As configurações e a entrada de inicialização também são separadas
   (`platform::APP_NAME`, "Process Monitor (dev)"): testar no dev não mexe nas do
   app instalado. `--replace` espera a anterior fechar; `--minimized` abre só na bandeja.
+- Se o Explorer recusar o ícone (`Tray::icon_shown` falso), o X minimiza em vez de
+  esconder: janela escondida sem ícone não tem volta.
+- O `wndproc` roda aninhado enquanto o `Shell_NotifyIconW` espera o Explorer: o
+  estado da thread usa `try_borrow_mut`. Um pânico ali derruba o processo.
 - Com a janela escondida, o eframe continua chamando `logic`: é por ali que ela
   volta (`ViewportCommand::Visible`).
 - Para testar o fechamento pelo instalador sem instalar: X (`WM_CLOSE`) para esconder

@@ -206,6 +206,13 @@ pub fn autostart_command() -> Option<String> {
     }
 }
 
+/// A entrada de inicialização abre este executável (e não uma cópia em outra pasta).
+pub fn autostart_points_here(command: &str) -> bool {
+    let Ok(exe) = std::env::current_exe() else { return true };
+    let quoted = format!("\"{}\"", exe.display());
+    command.to_lowercase().starts_with(&quoted.to_lowercase())
+}
+
 /// Liga ou desliga a abertura com o Windows, apontando para este executável. Por
 /// usuário: não pede administrador.
 pub fn set_autostart(enabled: bool, minimized: bool) -> Result<(), String> {

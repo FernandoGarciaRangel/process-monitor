@@ -285,8 +285,9 @@ pub struct App {
     pub updater: Updater,
     pub update_state: Arc<updater::State>,
     pub auto_update: bool,
-    /// O aviso de versão pronta foi dispensado nesta execução (continua nas configurações).
-    pub update_dismissed: bool,
+    /// Versão cujo aviso foi dispensado nesta execução (continua nas configurações). Se
+    /// sair outra, o aviso volta.
+    pub update_dismissed: Option<updater::Version>,
     pub settings_open: bool,
 
     pub tray: Tray,
@@ -408,7 +409,7 @@ impl App {
             updater: Updater::spawn(cc.egui_ctx.clone(), auto_update),
             update_state: Arc::new(updater::State::Idle),
             auto_update,
-            update_dismissed: false,
+            update_dismissed: None,
             settings_open: false,
             tray: Tray::spawn(cc.egui_ctx.clone(), minimize_to_tray),
             minimize_to_tray,
@@ -520,6 +521,26 @@ impl App {
         } else {
             self.hidden_columns.insert(key);
         }
+        self.sort_by_visible_column();
+    }
+
+    pub fn set_probe_http(&mut self, on: bool) {
+        self.probe_http = on;
+        self.sort_by_visible_column();
+    }
+
+    /// Ordenar por uma coluna escondida deixaria a tabela numa ordem sem explicação na
+    /// tela: volta para nome (processos) ou porta, que nunca somem.
+    fn sort_by_visible_column(&mut self) {
+        if !self.column_visible("processes", self.sort.key()) {
+            self.sort = SortKey::Name;
+            self.sort_desc = false;
+        }
+        let response = matches!(self.port_sort, PortSort::Response);
+        if !self.column_visible("ports", self.port_sort.key()) || (response && !self.probe_http) {
+            self.port_sort = PortSort::Port;
+            self.port_sort_desc = false;
+        }
     }
 
     /// Volta todas as opções ao padrão, inclusive a inicialização com o Windows e as
@@ -542,6 +563,7 @@ impl App {
         self.hidden_columns.clear();
         self.set_history_window(HistoryWindow::One);
         self.set_autostart(false, false);
+        self.set_alert_config(alerts::Config::default());
         for table in TABLES {
             ui::columns::reset_widths(ctx, table);
         }
@@ -563,7 +585,7 @@ impl App {
         if self.start_minimized {
             if ctx.cumulative_frame_nr() >= 1 {
                 self.start_minimized = false;
-                let command = if self.minimize_to_tray {
+                let command = if self.minimize_to_tray && self.tray.icon_shown() {
                     egui::ViewportCommand::Visible(false)
                 } else {
                     egui::ViewportCommand::Minimized(true)
@@ -586,9 +608,18 @@ impl App {
         }
         if ctx.input(|i| i.viewport().close_requested()) && self.minimize_to_tray && !self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            if !self.tray_hint_shown {
+            // Sem o ícone (o Explorer não aceitou), esconder deixaria a janela sem volta.
+            if self.tray.icon_shown() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+            if !self.tray_hint_shown && self.tray.icon_shown() {
                 self.tray_hint_shown = true;
+                // O clique no balão não pode abrir um alerta antigo.
+                if let Ok(mut slot) = self.last_alert.lock() {
+                    *slot = None;
+                }
                 self.tray.notifier().notify(
                     "O Process Monitor continua aberto",
                     "Ele fica no ícone da bandeja. Para fechar de vez, clique com o botão direito no ícone e escolha Sair.",
@@ -598,6 +629,11 @@ impl App {
     }
 
     pub fn set_interval(&mut self, ms: u64) {
+        // Os gráficos supõem pontos igualmente espaçados: com outro intervalo, o histórico
+        // antigo ficaria comprimido ou esticado. O do sampler também recomeça.
+        if ms != self.interval_ms {
+            self.histories.clear();
+        }
         self.interval_ms = ms;
         self.sampler.set_interval(Duration::from_millis(ms));
     }
@@ -612,7 +648,11 @@ impl App {
         let updater::State::Ready { installer, .. } = &*self.update_state else { return };
         match updater::install(installer) {
             Ok(()) => self.quit(ctx),
-            Err(e) => self.toast(format!("Não abriu o instalador: {e}"), ToastKind::Error, false),
+            Err(e) => {
+                self.toast(format!("Não abriu o instalador: {e}"), ToastKind::Error, false);
+                // O arquivo pode ter sumido (limpeza, antivírus): baixa de novo.
+                self.updater.check_now();
+            }
         }
     }
 
@@ -715,6 +755,10 @@ impl App {
     pub fn restart_target(&mut self, key: ProcKey) -> Result<ProcKey, &'static str> {
         let snap = self.snap.clone().ok_or("Ainda lendo o sistema.")?;
         let proc = snap.find(key).ok_or("O processo já encerrou.")?;
+        // Reiniciar o Chrome ou um serviço pela linha de comando não faz sentido.
+        if ports::classify(proc).is_none() {
+            return Err("Não é um servidor de desenvolvimento.");
+        }
         let root = ports::server_root(proc, |c| snap.parent_of(c));
         if root.cmd.is_empty() || root.cwd.is_none() {
             return Err("Sem acesso à linha de comando ou à pasta do processo. Execute como administrador.");
@@ -738,6 +782,11 @@ impl App {
         let Some(cwd) = root.cwd.clone() else { return };
         let label = Self::server_label(snap.find(key).unwrap_or(root));
         let targets: Vec<KillTarget> = snap.tree_postorder(root_key).into_iter().map(KillTarget::of).collect();
+        let elevated = if self.elevated {
+            " Como o Process Monitor está como administrador, o servidor também vai rodar como administrador."
+        } else {
+            ""
+        };
         let tree = match targets.len().saturating_sub(1) {
             0 => " será encerrado".to_owned(),
             1 => " e 1 processo filho serão encerrados".to_owned(),
@@ -747,7 +796,7 @@ impl App {
             title: format!("Reiniciar {label}?"),
             detail: format!(
                 "{} (PID {}){tree}, e o mesmo comando roda de novo numa janela de terminal nova, \
-                 em {}. O processo novo herda o ambiente do Process Monitor, não o do terminal original.\n\n{}",
+                 em {}. O processo novo herda o ambiente do Process Monitor, não o do terminal original.{elevated}\n\n{}",
                 root.name,
                 root.pid,
                 cwd.display(),
@@ -940,7 +989,7 @@ impl App {
         let now = Instant::now();
         self.toasts.retain(|t| t.until > now);
         let ready = match &*self.update_state {
-            updater::State::Ready { version, .. } if !self.update_dismissed => Some(*version),
+            updater::State::Ready { version, .. } if self.update_dismissed != Some(*version) => Some(*version),
             _ => None,
         };
         if self.toasts.is_empty() && ready.is_none() {
@@ -994,7 +1043,7 @@ impl App {
         }
         match update {
             Some(true) => self.install_update(ctx),
-            Some(false) => self.update_dismissed = true,
+            Some(false) => self.update_dismissed = ready,
             None => {}
         }
         if let Some(next) = self.toasts.iter().map(|t| t.until).min() {
@@ -1199,11 +1248,15 @@ fn save_alert_config(storage: &mut dyn eframe::Storage, c: &alerts::Config) {
     storage.set_string(ALERT_MEMORY_KEY, c.memory_bytes.to_string());
 }
 
+/// Lê a entrada de inicialização. Se ela aponta para outro executável (o app foi
+/// reinstalado em outra pasta), passa a apontar para este.
 fn read_autostart() -> (bool, bool) {
-    match platform::autostart_command() {
-        Some(cmd) => (true, cmd.contains(platform::MINIMIZED_ARG)),
-        None => (false, false),
+    let Some(cmd) = platform::autostart_command() else { return (false, false) };
+    let minimized = cmd.contains(platform::MINIMIZED_ARG);
+    if !platform::autostart_points_here(&cmd) {
+        let _ = platform::set_autostart(true, minimized);
     }
+    (true, minimized)
 }
 
 fn window_level(on_top: bool) -> egui::WindowLevel {

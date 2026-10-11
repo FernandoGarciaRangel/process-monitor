@@ -84,6 +84,11 @@ impl Alerts {
         self.cpu_since.retain(|k, _| alive.contains(k));
         self.cpu_alerted.retain(|k| alive.contains(k));
         self.memory_alerted.retain(|k| alive.contains(k));
+        // Desligado, ninguém atualiza a contagem: ao religar ela recomeça do zero, sem
+        // avisar na hora de um pico que começou com o alerta desligado.
+        if !config.cpu_enabled {
+            self.cpu_since.clear();
+        }
 
         for p in processes.iter().filter(|p| p.pid != own_pid) {
             let key = p.key();

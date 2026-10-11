@@ -1,11 +1,13 @@
 //! Barra lateral: marca, navegação e um cartão vivo por recurso.
 
+use std::time::Duration;
+
 use egui::{Align2, Color32, CornerRadius, Rect, Response, RichText, Sense, Stroke, Ui, pos2, vec2};
 use egui_phosphor::regular as icon;
 
 use crate::app::{App, View};
 use crate::format;
-use crate::sampler::{HISTORY_LEN, Series, Snapshot};
+use crate::sampler::{History, Series, Snapshot};
 use crate::theme::{self, ACCENT, CPU, DISK, GPU, GRAPHITE_1, GRAPHITE_2, INK, INK_2, INK_3, MEMORY, NETWORK, R_MD};
 use crate::ui::widgets::{self, ChartStyle, Layer};
 
@@ -49,7 +51,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
 fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
     // Os cartões mostram sempre o último minuto; a janela escolhida vale nas telas.
-    let tail = |series: &Series| series.tail(HISTORY_LEN);
+    let points = History::points(Duration::from_secs(60), Duration::from_millis(app.interval_ms));
+    let tail = |series: &Series| series.tail(points);
     let h = &s.history;
     let (cpu, memory) = (tail(&h.cpu), tail(&h.memory));
     let (disk_read, disk_write) = (tail(&h.disk_read), tail(&h.disk_write));

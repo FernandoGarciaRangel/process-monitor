@@ -110,9 +110,11 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Arc<State>>>, rx: Receiver<Msg>, mu
     remove_old_installers(&dir);
 
     let mut next = Instant::now() + FIRST_CHECK_DELAY;
+    // Com uma versão pronta, continua verificando: se sair outra enquanto o app fica na
+    // bandeja, o aviso passa a ser dela.
     let mut ready = false;
     loop {
-        let wait = if auto && !ready { next.saturating_duration_since(Instant::now()) } else { Duration::from_secs(3600) };
+        let wait = if auto { next.saturating_duration_since(Instant::now()) } else { Duration::from_secs(3600) };
         match rx.recv_timeout(wait) {
             Ok(Msg::Auto(on)) => {
                 // Ligar o automático verifica logo, sem esperar as 6 horas.
@@ -123,11 +125,14 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Arc<State>>>, rx: Receiver<Msg>, mu
                 continue;
             }
             Ok(Msg::CheckNow) => {}
-            Err(RecvTimeoutError::Timeout) if auto && !ready => {}
+            Err(RecvTimeoutError::Timeout) if auto => {}
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => return,
         }
-        publish(State::Checking);
+        // Pronta, a verificação é silenciosa: o botão de instalar não some enquanto isso.
+        if !ready {
+            publish(State::Checking);
+        }
         let result = check_and_download(&dir, &|state| publish(state));
         next = Instant::now() + if result.is_ok() { CHECK_INTERVAL } else { RETRY_INTERVAL };
         match result {
@@ -135,7 +140,12 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Arc<State>>>, rx: Receiver<Msg>, mu
                 ready = true;
                 publish(State::Ready { version, installer });
             }
-            Ok(None) => publish(State::UpToDate { at: chrono::Local::now() }),
+            Ok(None) => {
+                ready = false;
+                publish(State::UpToDate { at: chrono::Local::now() });
+            }
+            // A versão já baixada continua valendo.
+            Err(_) if ready => {}
             Err(e) => publish(State::Failed(e)),
         }
     }
@@ -242,10 +252,12 @@ pub fn install(installer: &Path) -> Result<(), String> {
 
 /// Ao lado dos dados do app, por usuário: não pede administrador para gravar.
 fn updates_dir() -> PathBuf {
+    // O build de debug tem a pasta dele: ao abrir, ele apagaria o instalador que a
+    // versão instalada baixou (a do Cargo.toml já é a nova).
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("Process Monitor")
+        .join(crate::platform::APP_NAME)
         .join("updates")
 }
 

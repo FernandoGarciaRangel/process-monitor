@@ -323,6 +323,10 @@ pub fn likely_http(kind: Kind, cmd: &str) -> bool {
 /// enquanto forem de desenvolvimento, atravessando o `cmd.exe` que o npm usa entre ele
 /// e o Vite (`npm run dev` → `cmd /c vite` → `node vite`). Para no shell ou terminal
 /// do usuário, que não pode ser finalizado junto.
+///
+/// O `cmd.exe` só é atravessado quando acima dele está o npm (ou pnpm, yarn): uma
+/// ferramenta em Node que abre comandos por um shell (`concurrently`, um agente de
+/// IA) também é `node.exe`, e reiniciá-la levaria junto tudo o que ela abriu.
 pub fn server_root<'a>(p: &'a ProcInfo, parent_of: impl Fn(&ProcInfo) -> Option<&'a ProcInfo>) -> &'a ProcInfo {
     let mut root = p;
     // O limite só protege de um laço de PIDs; uma cadeia real tem 3 ou 4 níveis.
@@ -333,6 +337,7 @@ pub fn server_root<'a>(p: &'a ProcInfo, parent_of: impl Fn(&ProcInfo) -> Option<
         } else if parent.name.eq_ignore_ascii_case("cmd.exe")
             && let Some(grand) = parent_of(parent)
             && classify(grand).is_some()
+            && is_package_runner(grand)
         {
             root = grand;
         } else {
@@ -340,6 +345,12 @@ pub fn server_root<'a>(p: &'a ProcInfo, parent_of: impl Fn(&ProcInfo) -> Option<
         }
     }
     root
+}
+
+/// `npm run`, `npx`, `pnpm` ou `yarn`: quem abre o `cmd /c` de um script do package.json.
+fn is_package_runner(p: &ProcInfo) -> bool {
+    let cmd = p.cmd.to_ascii_lowercase();
+    ["npm-cli.js", "npx-cli.js", "pnpm", "yarn"].iter().any(|r| cmd.contains(r))
 }
 
 /// Pastas que marcam o fim do caminho do projeto.
@@ -945,6 +956,17 @@ ode.exe" npm-cli.js run dev"#),
 ode_modulesiteinite.js"),
         ];
         assert_eq!(server_root(&npm[3], |c| parent_in(&npm, c)).pid, 2);
+
+        // Uma ferramenta em Node que abre o npm por um shell (concurrently) não entra:
+        // reiniciá-la levaria junto os outros servidores que ela abriu.
+        let tool = vec![
+            with_cmd(proc(1, None, 10, "node.exe"), "node concurrently \"npm run api\" \"npm run web\""),
+            proc(2, Some(1), 11, "cmd.exe"),
+            with_cmd(proc(3, Some(2), 12, "node.exe"), "node npm-cli.js run web"),
+            proc(4, Some(3), 13, "cmd.exe"),
+            with_cmd(proc(5, Some(4), 14, "node.exe"), "node vite.js"),
+        ];
+        assert_eq!(server_root(&tool[4], |c| parent_in(&tool, c)).pid, 3);
 
         // pwsh → python -m uvicorn (sem reload): ele mesmo.
         let uvicorn = vec![proc(1, None, 10, "pwsh.exe"), with_cmd(proc(2, Some(1), 11, "python.exe"), "python -m uvicorn main:app")];

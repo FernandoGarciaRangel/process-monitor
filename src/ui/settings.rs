@@ -135,6 +135,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp(section_id, section));
     if close || modal.should_close() {
         app.settings_open = false;
+        // A confirmação de redefinir não fica armada para a próxima abertura.
+        ctx.data_mut(|d| d.remove_temp::<bool>(Id::new("settings_reset_confirm")));
     }
 }
 
@@ -449,7 +451,10 @@ fn ports_section(app: &mut App, ui: &mut Ui) {
              Desligado, nenhuma requisição é feita e as colunas Resposta e Conexão somem.",
             40.0,
             |ui| {
-                widgets::toggle(ui, &mut app.probe_http);
+                let mut on = app.probe_http;
+                if widgets::toggle(ui, &mut on).changed() {
+                    app.set_probe_http(on);
+                }
             },
         );
     });
@@ -556,7 +561,7 @@ fn status_text(state: &State) -> (String, Color32) {
             (format!("Baixando a versão {version}… {progress}"), INK_2)
         }
         State::Ready { version, .. } => (format!("Versão {version} baixada e pronta para instalar"), ACCENT),
-        State::Failed(e) => (format!("Não foi possível verificar: {e}"), theme::DANGER),
+        State::Failed(e) => (format!("A atualização falhou: {e}"), theme::DANGER),
     }
 }
 
@@ -612,7 +617,7 @@ fn about(app: &mut App, ui: &mut Ui) {
             ui.label(RichText::new("Redefinir todas as configurações?").font(theme::semibold(13.0)).color(INK));
             ui.label(
                 RichText::new(
-                    "Volta tudo ao padrão: janela, colunas, larguras, portas, gráficos e atualização. \
+                    "Volta tudo ao padrão: janela, colunas, larguras, portas, alertas, gráficos e atualização. \
                      A inicialização com o Windows é desligada.",
                 )
                 .font(theme::regular(12.0))

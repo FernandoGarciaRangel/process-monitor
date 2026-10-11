@@ -8,11 +8,12 @@
 //! A janela principal é do eframe: a thread só levanta sinais e pede um quadro. O
 //! `logic` continua rodando com a janela escondida e aplica os sinais.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::Duration;
 use std::sync::{Arc, OnceLock};
 
 use windows::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, WAIT_ABANDONED, WAIT_OBJECT_0, WPARAM,
+    ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
@@ -67,17 +68,24 @@ pub fn single_instance(replace: bool) -> Option<Instance> {
     match mutex {
         Ok(handle) if !exists => Some(Instance(handle)),
         Ok(handle) if replace => {
-            let wait = unsafe { WaitForSingleObject(handle, 15_000) };
-            (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED).then_some(Instance(handle))
+            // A anterior já decidiu fechar. Se demorar demais, abre assim mesmo: duas
+            // instâncias por um instante é melhor que nenhuma.
+            let _ = unsafe { WaitForSingleObject(handle, 15_000) };
+            Some(Instance(handle))
         }
         // Já existe, ou acesso negado: o mutex é de uma instância elevada.
         _ => {
-            unsafe {
-                if let Ok(hwnd) = FindWindowW(&class_name(), PCWSTR::null()) {
-                    // A instância que já roda precisa poder trazer a janela para a frente.
-                    let _ = AllowSetForegroundWindow(ASFW_ANY);
-                    let _ = PostMessageW(Some(hwnd), show_message(), WPARAM(0), LPARAM(0));
+            // A outra pode estar abrindo ainda (a janela da bandeja nasce depois do mutex).
+            for _ in 0..40 {
+                if let Ok(hwnd) = unsafe { FindWindowW(&class_name(), PCWSTR::null()) } {
+                    unsafe {
+                        // A instância que já roda precisa poder trazer a janela para a frente.
+                        let _ = AllowSetForegroundWindow(ASFW_ANY);
+                        let _ = PostMessageW(Some(hwnd), show_message(), WPARAM(0), LPARAM(0));
+                    }
+                    break;
                 }
+                std::thread::sleep(Duration::from_millis(250));
             }
             None
         }
@@ -88,6 +96,9 @@ struct Shared {
     ctx: egui::Context,
     /// O usuário quer o ícone (opção "Minimizar para a bandeja").
     icon_wanted: AtomicBool,
+    /// O ícone está mesmo na bandeja (o `NIM_ADD` pode falhar). Sem ele, esconder a
+    /// janela a deixaria sem caminho de volta.
+    icon_shown: AtomicBool,
     show: AtomicBool,
     quit: AtomicBool,
     balloon_clicked: AtomicBool,
@@ -116,6 +127,10 @@ impl Notifier {
     /// Balão do Windows (vira notificação no Windows 10 e 11). Se o ícone estiver
     /// desligado, ele aparece só enquanto o balão estiver na tela.
     pub fn notify(&self, title: &str, body: &str) {
+        // Sem a janela da bandeja, o PostMessage cairia na fila desta thread e o balão vazaria.
+        if self.hwnd == 0 {
+            return;
+        }
         let balloon = Box::into_raw(Box::new(Balloon { title: title.to_owned(), body: body.to_owned() }));
         let posted =
             unsafe { PostMessageW(Some(self.hwnd()), WM_NOTIFY_BALLOON, WPARAM(0), LPARAM(balloon as isize)) };
@@ -137,6 +152,7 @@ impl Tray {
                 Arc::new(Shared {
                     ctx,
                     icon_wanted: AtomicBool::new(icon),
+                    icon_shown: AtomicBool::new(false),
                     show: AtomicBool::new(false),
                     quit: AtomicBool::new(false),
                     balloon_clicked: AtomicBool::new(false),
@@ -161,6 +177,11 @@ impl Tray {
         unsafe {
             let _ = PostMessageW(Some(self.notifier.hwnd()), WM_SET_ICON, WPARAM(on as usize), LPARAM(0));
         }
+    }
+
+    /// Dá para esconder a janela: o ícone está na bandeja para trazê-la de volta.
+    pub fn icon_shown(&self) -> bool {
+        self.shared.icon_shown.load(Ordering::Relaxed)
     }
 
     /// Pedido de mostrar a janela (clique no ícone, segunda instância, balão).
@@ -196,9 +217,12 @@ struct Local {
     shown: bool,
     /// Ícone posto só para um balão, com a opção desligada.
     temporary: bool,
-    taskbar_created: u32,
-    show_message: u32,
 }
+
+// Fora do `LOCAL`: o `wndproc` confere em toda mensagem, inclusive nas que chegam
+// aninhadas enquanto o `LOCAL` está emprestado.
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+static SHOW_MESSAGE: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
     static LOCAL: std::cell::RefCell<Option<Local>> = const { std::cell::RefCell::new(None) };
@@ -236,15 +260,17 @@ fn run(tx: std::sync::mpsc::Sender<isize>) {
         // Uma instância elevada ainda precisa ouvir a segunda instância comum.
         let show_message = show_message();
         let _ = ChangeWindowMessageFilterEx(hwnd, show_message, MSGFLT_ALLOW, None);
+        SHOW_MESSAGE.store(show_message, Ordering::Relaxed);
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
         let _ = ChangeWindowMessageFilterEx(hwnd, taskbar_created, MSGFLT_ALLOW, None);
+        TASKBAR_CREATED.store(taskbar_created, Ordering::Relaxed);
 
         let exe = std::env::current_exe().map(|p| HSTRING::from(p.as_os_str())).unwrap_or_default();
         let (mut large, mut small) = (HICON::default(), HICON::default());
         ExtractIconExW(&exe, 0, Some(&mut large), Some(&mut small), 1);
 
         LOCAL.with_borrow_mut(|l| {
-            *l = Some(Local { hwnd, small, large, shown: false, temporary: false, taskbar_created, show_message })
+            *l = Some(Local { hwnd, small, large, shown: false, temporary: false })
         });
         if shared().icon_wanted.load(Ordering::Relaxed) {
             with_local(add_icon);
@@ -258,8 +284,16 @@ fn run(tx: std::sync::mpsc::Sender<isize>) {
     }
 }
 
+/// `Shell_NotifyIconW` espera o Explorer e, enquanto isso, o Windows entrega a esta
+/// thread mensagens enviadas de fora (`WM_SETTINGCHANGE`, fim de sessão): o `wndproc`
+/// roda aninhado. Um segundo empréstimo daria pânico, e pânico num `extern "system"`
+/// derruba o processo; aninhada, a mensagem só não mexe no ícone.
 fn with_local<R>(f: impl FnOnce(&mut Local) -> R) -> Option<R> {
-    LOCAL.with_borrow_mut(|l| l.as_mut().map(f))
+    LOCAL.with(|cell| cell.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+fn publish_shown(l: &Local) {
+    shared().icon_shown.store(l.shown && !l.temporary, Ordering::Relaxed);
 }
 
 fn base_data(l: &Local) -> NOTIFYICONDATAW {
@@ -285,6 +319,7 @@ fn add_icon(l: &mut Local) {
             l.shown = true;
         }
     }
+    publish_shown(l);
 }
 
 fn remove_icon(l: &mut Local) {
@@ -295,12 +330,14 @@ fn remove_icon(l: &mut Local) {
         l.shown = false;
     }
     l.temporary = false;
+    publish_shown(l);
 }
 
 fn show_balloon(l: &mut Local, balloon: &Balloon) {
     if !l.shown {
         add_icon(l);
         l.temporary = l.shown;
+        publish_shown(l);
     }
     let mut data = base_data(l);
     data.uFlags = NIF_INFO;
@@ -336,7 +373,8 @@ fn menu(hwnd: HWND) {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let (taskbar_created, show_message) = with_local(|l| (l.taskbar_created, l.show_message)).unwrap_or((0, 0));
+    let taskbar_created = TASKBAR_CREATED.load(Ordering::Relaxed);
+    let show_message = SHOW_MESSAGE.load(Ordering::Relaxed);
     match msg {
         WM_TRAY => {
             // NOTIFYICON_VERSION_4: o evento vem na palavra baixa do lParam.
@@ -379,6 +417,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if wparam.0 != 0 {
                 signal(&shared().quit);
                 with_local(remove_icon);
+                // No logoff o Windows pode encerrar o processo assim que esta mensagem
+                // volta. Segura um pouco para a janela fechar e salvar as configurações;
+                // o processo terminando leva esta thread junto.
+                std::thread::sleep(Duration::from_secs(4));
             }
             LRESULT(0)
         }

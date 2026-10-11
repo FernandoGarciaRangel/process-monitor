@@ -575,25 +575,41 @@ fn run(
         ctx.request_repaint();
 
         // Espera o intervalo, mas acorda antes se a UI pedir uma coleta ou mudar o intervalo.
-        match rx.recv_timeout(interval) {
-            Ok(command) => {
-                match command {
-                    Command::SetInterval(d) => interval = d,
-                    Command::SetHistoryWindow(w) => window = w,
-                    Command::SetAlerts(c) => alert_config = c,
-                    Command::SetAlertSink(s) => alert_sink = Some(s),
-                    Command::Refresh => {}
+        // Mudar alertas ou a janela do gráfico só aplica e volta a esperar: coletar já
+        // a cada mudança daria uma coleta por tecla digitada nos alertas.
+        let deadline = Instant::now() + interval;
+        loop {
+            match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(command) => {
+                    let collect_now = matches!(command, Command::Refresh | Command::SetInterval(_));
+                    match command {
+                        Command::SetInterval(d) => {
+                            // Pontos de outro intervalo distorceriam o eixo do tempo: recomeça.
+                            if d != interval {
+                                history = History::new(History::points(window, d));
+                            }
+                            interval = d;
+                        }
+                        Command::SetHistoryWindow(w) => window = w,
+                        Command::SetAlerts(c) => alert_config = c,
+                        Command::SetAlertSink(s) => alert_sink = Some(s),
+                        Command::Refresh => {}
+                    }
+                    // Mesma janela de tempo com outro intervalo = outro número de pontos.
+                    history.resize(History::points(window, interval));
+                    if !collect_now {
+                        continue;
+                    }
+                    // A CPU precisa de um intervalo mínimo entre leituras para não sair zerada.
+                    let since = last.elapsed();
+                    if since < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+                        std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL - since);
+                    }
+                    break;
                 }
-                // Mesma janela de tempo com outro intervalo = outro número de pontos.
-                history.resize(History::points(window, interval));
-                // A CPU precisa de um intervalo mínimo entre leituras para não sair zerada.
-                let since = last.elapsed();
-                if since < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
-                    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL - since);
-                }
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return,
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
         }
     }
 }
@@ -609,15 +625,39 @@ fn resolve_user(sid: &str) -> Option<String> {
     })
 }
 
-/// Junta os argumentos, com aspas nos que têm espaço, como apareceriam no terminal.
+/// Remonta a linha de comando, que é rodada de novo ao reiniciar um servidor.
 fn join_cmd(args: &[std::ffi::OsString]) -> String {
-    args.iter()
-        .map(|a| {
-            let s = a.to_string_lossy();
-            if s.contains(' ') && !s.starts_with('"') { format!("\"{s}\"") } else { s.into_owned() }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    args.iter().map(|a| quote_arg(&a.to_string_lossy())).collect::<Vec<_>>().join(" ")
+}
+
+/// Aspas no padrão do `CommandLineToArgvW`. Também em argumento vazio (sumiria e
+/// deslocaria os seguintes) e com `&|<>^()`, que o `cmd.exe` interpretaria fora de aspas.
+fn quote_arg(s: &str) -> String {
+    if !s.is_empty() && !s.contains([' ', '\t', '"', '&', '|', '<', '>', '^', '(', ')']) {
+        return s.to_owned();
+    }
+    let mut out = String::from('"');
+    let mut slashes = 0;
+    for c in s.chars() {
+        match c {
+            '\\' => slashes += 1,
+            '"' => {
+                // Barras antes de aspas dobram, e a aspa ganha a sua.
+                out.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+                out.push('"');
+                slashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat_n('\\', slashes));
+                out.push(c);
+                slashes = 0;
+            }
+        }
+    }
+    // Barras no fim, antes da aspa de fechar, também dobram (`C:\dir\` → `"C:\dir\\"`).
+    out.extend(std::iter::repeat_n('\\', slashes * 2));
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -718,5 +758,7 @@ pub(crate) mod tests {
     fn join_cmd_aspas() {
         let args = ["C:\\Program Files\\app.exe".into(), "--flag".into()];
         assert_eq!(join_cmd(&args), "\"C:\\Program Files\\app.exe\" --flag");
+        let args = ["node".into(), "".into(), "--name=a&b".into(), "C:\\a b\\".into(), "x\"y".into()];
+        assert_eq!(join_cmd(&args), r#"node "" "--name=a&b" "C:\a b\\" "x\"y""#);
     }
 }
