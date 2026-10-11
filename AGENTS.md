@@ -7,8 +7,9 @@ comentários em pt-BR, com acentos.
 Stack: Rust 2024 · eframe/egui 0.36 (renderizador `glow`) · sysinfo 0.39 ·
 windows 0.62 · instalador Inno Setup 6.
 
-Repositório: `FernandoGarciaSimpipe/process-monitor`, na conta **pessoal** do
-Fernando, privado. **Nunca** na org `gpdsimpipe`.
+Repositório: `FernandoGarciaRangel/process-monitor`, na conta **pessoal** do
+Fernando. **Nunca** na org `gpdsimpipe`. Precisa ser **público**: a atualização
+automática baixa as releases sem token (ver `updater::REPO`).
 
 # Build e testes
 

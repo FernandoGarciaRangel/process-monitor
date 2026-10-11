@@ -22,7 +22,7 @@ use windows::Win32::Networking::WinHttp::{
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
-pub const REPO: &str = "FernandoGarciaSimpipe/process-monitor";
+pub const REPO: &str = "FernandoGarciaRangel/process-monitor";
 /// Espera antes da primeira verificação, para não disputar a abertura com a coleta.
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(15);
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 3600);
@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn tag_from_redirect() {
-        let url = "https://github.com/FernandoGarciaSimpipe/process-monitor/releases/tag/v0.3.0";
+        let url = "https://github.com/FernandoGarciaRangel/process-monitor/releases/tag/v0.3.0";
         assert_eq!(tag_version(url), Some(Version(0, 3, 0)));
         assert_eq!(tag_version("https://github.com/x/y/releases"), None);
     }
