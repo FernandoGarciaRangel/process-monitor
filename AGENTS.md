@@ -159,7 +159,9 @@ e dos balões, e recebe o pedido de fechar do Windows.
 - Instância única por mutex: uma segunda cópia avisa a primeira e sai na hora. Num
   script, espere o processo anterior sumir antes de abrir outro. O build de debug
   usa nomes com `.dev`, então convive com a versão instalada (mas não com outro
-  debug). `--replace` espera a anterior fechar; `--minimized` abre só na bandeja.
+  debug). As configurações e a entrada de inicialização também são separadas
+  (`platform::APP_NAME`, "Process Monitor (dev)"): testar no dev não mexe nas do
+  app instalado. `--replace` espera a anterior fechar; `--minimized` abre só na bandeja.
 - Com a janela escondida, o eframe continua chamando `logic`: é por ali que ela
   volta (`ViewportCommand::Visible`).
 - Para testar o fechamento pelo instalador sem instalar: X (`WM_CLOSE`) para esconder

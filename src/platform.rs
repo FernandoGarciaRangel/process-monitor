@@ -170,6 +170,15 @@ pub fn relaunch_as_admin() -> Result<(), String> {
 }
 
 const RUN_KEY: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
+/// Nome das configurações (`%APPDATA%\<nome>`) e da entrada de inicialização. O build
+/// de debug usa outro, para não sobrescrever os da versão instalada.
+#[cfg(debug_assertions)]
+pub const APP_NAME: &str = "Process Monitor (dev)";
+#[cfg(not(debug_assertions))]
+pub const APP_NAME: &str = "Process Monitor";
+#[cfg(debug_assertions)]
+const RUN_VALUE: PCWSTR = w!("Process Monitor (dev)");
+#[cfg(not(debug_assertions))]
 const RUN_VALUE: PCWSTR = w!("Process Monitor");
 /// Argumento que a entrada de inicialização passa para abrir sem mostrar a janela.
 pub const MINIMIZED_ARG: &str = "--minimized";

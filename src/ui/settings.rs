@@ -594,7 +594,7 @@ fn about(app: &mut App, ui: &mut Ui) {
     heading(ui, "Dados");
     widgets::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
-        let data_dir = eframe::storage_dir("Process Monitor");
+        let data_dir = eframe::storage_dir(crate::platform::APP_NAME);
         let path = data_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
         row(ui, "Pasta de dados", &path, 90.0, |ui| {
             if ui.add_enabled(data_dir.is_some(), egui::Button::new("Abrir")).clicked()
