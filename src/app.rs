@@ -288,6 +288,8 @@ pub struct App {
     /// Versão cujo aviso foi dispensado nesta execução (continua nas configurações). Se
     /// sair outra, o aviso volta.
     pub update_dismissed: Option<updater::Version>,
+    /// Versão já anunciada num balão do Windows: cada versão avisa uma vez.
+    update_announced: Option<updater::Version>,
     pub settings_open: bool,
 
     pub tray: Tray,
@@ -410,6 +412,7 @@ impl App {
             update_state: Arc::new(updater::State::Idle),
             auto_update,
             update_dismissed: None,
+            update_announced: None,
             settings_open: false,
             tray: Tray::spawn(cc.egui_ctx.clone(), minimize_to_tray),
             minimize_to_tray,
@@ -641,6 +644,25 @@ impl App {
     pub fn set_auto_update(&mut self, on: bool) {
         self.auto_update = on;
         self.updater.set_auto(on);
+    }
+
+    /// Balão do Windows quando a atualização automática termina de baixar uma versão: com
+    /// o app na bandeja, o aviso dentro da janela passaria despercebido. O clique no balão
+    /// abre a janela, onde está o aviso com o botão de instalar.
+    fn announce_update(&mut self) {
+        let updater::State::Ready { version, .. } = &*self.update_state else { return };
+        if !self.auto_update || self.update_announced == Some(*version) {
+            return;
+        }
+        self.update_announced = Some(*version);
+        // O clique no balão não pode abrir um alerta antigo.
+        if let Ok(mut slot) = self.last_alert.lock() {
+            *slot = None;
+        }
+        self.tray.notifier().notify(
+            &format!("Versão {version} disponível"),
+            "Já foi baixada. Clique para abrir o Process Monitor e instalar.",
+        );
     }
 
     /// Roda o instalador baixado e fecha o app; o instalador abre a versão nova.
@@ -1086,6 +1108,7 @@ impl eframe::App for App {
         // Sem sondagem, nada de mostrar a última resposta como se fosse atual.
         self.port_status = if self.probe_http { self.prober.latest() } else { Arc::default() };
         self.update_state = self.updater.latest();
+        self.announce_update();
         self.icons.poll(ctx);
         while let Ok(result) = self.relaunch_rx.try_recv() {
             match result {
