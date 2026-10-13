@@ -57,6 +57,10 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Run]
+; Instalado em outra pasta (por usuario em vez de para todos, ou o contrario): a chave
+; ainda apontaria para a copia antiga. Sem skipifsilent, para valer na atualizacao; o
+; exe so pede administrador se a chave apontar para outra copia.
+Filename: "{app}\{#AppExe}"; Parameters: "--repoint-taskmgr"; Flags: waituntilterminated
 ; Substituir o Gerenciador de Tarefas: o exe pede administrador sozinho (UAC) e grava
 ; a chave IFEO em HKLM, que o instalador por usuario nao alcanca. skipifsilent: a
 ; atualizacao silenciosa nao repete (a chave ja esta posta e aponta para o mesmo exe).

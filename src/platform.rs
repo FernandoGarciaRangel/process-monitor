@@ -252,19 +252,16 @@ pub fn set_autostart(enabled: bool, minimized: bool) -> Result<(), String> {
 const TASKMGR_IFEO_KEY: PCWSTR = w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe");
 const DEBUGGER_VALUE: PCWSTR = w!("Debugger");
 
-/// Este exe está registrado no lugar do Gerenciador de Tarefas? Lê HKLM; a leitura
-/// não precisa de administrador.
-pub fn replaces_task_manager() -> bool {
-    let Ok(exe) = std::env::current_exe() else { return false };
+/// Programa registrado no lugar do Gerenciador de Tarefas, como está na chave IFEO.
+/// Lê HKLM; a leitura não precisa de administrador.
+fn task_manager_debugger() -> Option<String> {
     unsafe {
         let mut len = 0u32;
-        if RegGetValueW(HKEY_LOCAL_MACHINE, TASKMGR_IFEO_KEY, DEBUGGER_VALUE, RRF_RT_REG_SZ, None, None, Some(&mut len))
-            .is_err()
-        {
-            return false;
-        }
+        RegGetValueW(HKEY_LOCAL_MACHINE, TASKMGR_IFEO_KEY, DEBUGGER_VALUE, RRF_RT_REG_SZ, None, None, Some(&mut len))
+            .ok()
+            .ok()?;
         let mut buf = vec![0u16; len as usize / 2];
-        if RegGetValueW(
+        RegGetValueW(
             HKEY_LOCAL_MACHINE,
             TASKMGR_IFEO_KEY,
             DEBUGGER_VALUE,
@@ -273,14 +270,31 @@ pub fn replaces_task_manager() -> bool {
             Some(buf.as_mut_ptr().cast()),
             Some(&mut len),
         )
-        .is_err()
-        {
-            return false;
-        }
-        let value = String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]);
-        let quoted = format!("\"{}\"", exe.display());
-        value.trim().eq_ignore_ascii_case(&quoted)
+        .ok()
+        .ok()?;
+        Some(String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]).trim().to_owned())
     }
+}
+
+/// Este exe está registrado no lugar do Gerenciador de Tarefas?
+pub fn replaces_task_manager() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    task_manager_debugger().is_some_and(|value| value.eq_ignore_ascii_case(&format!("\"{}\"", exe.display())))
+}
+
+/// A chave aponta para outra cópia do Process Monitor (instalado antes em outra pasta,
+/// por usuário em vez de para todos, ou o contrário). Aí o Ctrl+Shift+Esc abre a cópia
+/// antiga, ou nada se ela foi apagada. Programa de outro fabricante não conta.
+pub fn task_manager_points_to_other_copy() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let Some(value) = task_manager_debugger() else { return false };
+    other_copy(&value, &exe)
+}
+
+fn other_copy(value: &str, exe: &Path) -> bool {
+    let target = Path::new(value.trim().trim_matches('"'));
+    let same_name = target.file_name().zip(exe.file_name()).is_some_and(|(a, b)| a.eq_ignore_ascii_case(b));
+    same_name && !target.as_os_str().eq_ignore_ascii_case(exe.as_os_str())
 }
 
 /// Grava ou apaga a chave direto no HKLM. Só funciona com o processo já elevado — é o
@@ -732,6 +746,16 @@ mod tests {
         }
         assert!(marker.exists(), "o comando deveria ter rodado em {dir:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gerenciador_de_tarefas_em_outra_copia() {
+        let exe = Path::new(r"C:\Program Files\Process Monitor\process-monitor.exe");
+        let old = r#""C:\Users\x\AppData\Local\Programs\Process Monitor\process-monitor.exe""#;
+        assert!(other_copy(old, exe));
+        assert!(!other_copy(r#""c:\program files\process monitor\PROCESS-MONITOR.EXE""#, exe));
+        // Process Explorer ou outro programa: não é nosso, não se mexe.
+        assert!(!other_copy(r#""C:\Tools\procexp64.exe""#, exe));
     }
 
     #[test]

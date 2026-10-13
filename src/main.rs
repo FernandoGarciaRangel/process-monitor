@@ -33,6 +33,15 @@ fn main() -> eframe::Result {
         let _ = platform::request_replace_task_manager(true);
         return Ok(());
     }
+    // Chamado pelo instalador em toda instalação, inclusive a atualização silenciosa: se
+    // a chave aponta para uma cópia em outra pasta, passa a apontar para esta. Só pede
+    // administrador nesse caso; no resto, sai na hora.
+    if has("--repoint-taskmgr") {
+        if platform::task_manager_points_to_other_copy() {
+            let _ = platform::request_replace_task_manager(true);
+        }
+        return Ok(());
+    }
     // Chamado pelo desinstalador: só restaura se a chave ainda aponta para nós, para
     // não apagar a de outro programa (Process Explorer) nem pedir UAC à toa.
     if has("--restore-taskmgr") {
