@@ -172,6 +172,80 @@ fn nt_call(key: ProcKey, name: &str, function: windows::core::PCSTR) -> Result<(
     }
 }
 
+/// Começo de `SYSTEM_PROCESS_INFORMATION` (x64), só os campos usados. A estrutura toda
+/// tem 256 bytes e é seguida pelas threads do processo.
+#[repr(C)]
+struct ProcessEntry {
+    next_entry_offset: u32,
+    number_of_threads: u32,
+    _skip: [u8; 72],
+    unique_process_id: usize,
+}
+
+/// `SYSTEM_THREAD_INFORMATION` (x64), 80 bytes.
+#[repr(C)]
+struct ThreadEntry {
+    _times_and_ids: [u8; 68],
+    thread_state: u32,
+    wait_reason: u32,
+    _pad: u32,
+}
+
+const PROCESS_ENTRY_SIZE: usize = 256;
+const THREAD_WAITING: u32 = 5;
+const WAIT_SUSPENDED: u32 = 5;
+
+/// PIDs com todas as threads suspensas: por este app, por outro programa ou pelo
+/// Windows (app da loja em segundo plano). É o mesmo critério do Gerenciador de Tarefas.
+/// Uma chamada só para o sistema todo; `buf` é reaproveitado entre coletas.
+pub fn suspended_pids(buf: &mut Vec<u8>) -> std::collections::HashSet<u32> {
+    type QueryFn = unsafe extern "system" fn(u32, *mut core::ffi::c_void, u32, *mut u32) -> i32;
+    const SYSTEM_PROCESS_INFORMATION: u32 = 5;
+    const STATUS_INFO_LENGTH_MISMATCH: u32 = 0xC000_0004;
+    let mut out = std::collections::HashSet::new();
+    unsafe {
+        let Ok(ntdll) = GetModuleHandleW(w!("ntdll.dll")) else { return out };
+        let Some(address) = GetProcAddress(ntdll, s!("NtQuerySystemInformation")) else { return out };
+        let query: QueryFn = std::mem::transmute(address);
+        if buf.len() < 512 * 1024 {
+            buf.resize(512 * 1024, 0);
+        }
+        let mut status = 0;
+        for _ in 0..4 {
+            let mut needed = 0u32;
+            status = query(SYSTEM_PROCESS_INFORMATION, buf.as_mut_ptr().cast(), buf.len() as u32, &mut needed);
+            if status as u32 != STATUS_INFO_LENGTH_MISMATCH {
+                break;
+            }
+            // Folga para processos que nascem entre uma chamada e outra.
+            buf.resize((needed as usize).max(buf.len()) + 64 * 1024, 0);
+        }
+        if status != 0 {
+            return out;
+        }
+        let mut offset = 0usize;
+        loop {
+            if offset + PROCESS_ENTRY_SIZE > buf.len() {
+                break;
+            }
+            let entry = &*(buf.as_ptr().add(offset) as *const ProcessEntry);
+            let threads = entry.number_of_threads as usize;
+            let first = offset + PROCESS_ENTRY_SIZE;
+            if threads > 0 && first + threads * size_of::<ThreadEntry>() <= buf.len() {
+                let list = std::slice::from_raw_parts(buf.as_ptr().add(first) as *const ThreadEntry, threads);
+                if list.iter().all(|t| t.thread_state == THREAD_WAITING && t.wait_reason == WAIT_SUSPENDED) {
+                    out.insert(entry.unique_process_id as u32);
+                }
+            }
+            if entry.next_entry_offset == 0 {
+                break;
+            }
+            offset += entry.next_entry_offset as usize;
+        }
+    }
+    out
+}
+
 /// Abre o processo e confere que o PID ainda é dele.
 fn open(key: ProcKey, access: PROCESS_ACCESS_RIGHTS) -> Result<HandleGuard, KillError> {
     unsafe {
@@ -227,8 +301,12 @@ mod tests {
     fn suspende_e_retoma() {
         let mut child = spawn_victim();
         let key = key_of(&child);
+        let mut buf = Vec::new();
+        assert!(!suspended_pids(&mut buf).contains(&key.pid));
         assert_eq!(suspend(key, "PING.EXE"), Ok(()));
+        assert!(suspended_pids(&mut buf).contains(&key.pid), "suspenso por este app aparece na leitura do sistema");
         assert_eq!(resume(key, "PING.EXE"), Ok(()));
+        assert!(!suspended_pids(&mut buf).contains(&key.pid));
         // Hora de criação errada: o PID "é de outro processo".
         assert_eq!(suspend(ProcKey { pid: key.pid, start: key.start + 100 }, "PING.EXE"), Err(KillError::PidReused));
         let _ = child.kill();

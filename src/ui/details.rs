@@ -59,7 +59,7 @@ fn body(app: &mut App, ui: &mut Ui) {
                 if tree.on_hover_text("Finalizar o processo e todos os que ele abriu").clicked() {
                     app.request_kill(key, true);
                 }
-                let suspended = app.suspended.contains(&key);
+                let suspended = p.suspended;
                 let blocked = control::suspend_blocked(key.pid, &p.name);
                 let glyph = if suspended { icon::PLAY } else { icon::PAUSE };
                 let pause = ui.add_enabled(
@@ -84,7 +84,7 @@ fn body(app: &mut App, ui: &mut Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         Frame::NONE.inner_margin(Margin { left: 20, right: 18, top: 18, bottom: 12 }).show(ui, |ui| {
             header(app, ui, p.display_name(), &p.name, p.pid, p.exe.as_deref(), p.user.as_deref());
-            if app.suspended.contains(&key) {
+            if p.suspended {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     crate::ui::processes::suspended_pill(ui);

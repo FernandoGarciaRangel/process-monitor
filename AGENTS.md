@@ -200,8 +200,12 @@ criação; case com a coleta pelos dois (±2 s), nunca só pelo PID.
   afinidade e modo eficiência (EcoQoS e prioridade baixa, como o Gerenciador de Tarefas).
   Tudo confere a hora de criação, como o `kill`. `dwm.exe`, `explorer.exe` e os críticos
   não suspendem: a sessão congelaria sem como retomar. Tempo real fica de fora de propósito.
-- O Windows não diz se um processo foi suspenso. `App::suspended` guarda os que este app
-  suspendeu e é salvo entre execuções (PID + hora de criação).
+- "Suspenso" vem da coleta: `control::suspended_pids` lê as threads do sistema todo numa
+  chamada (`NtQuerySystemInformation`) e marca quem tem todas em espera por suspensão,
+  como o Gerenciador de Tarefas. Vale para quem foi suspenso por outro programa e para
+  apps da loja congelados pelo Windows.
+- Bateria: `platform::battery`, pintada na linha do rótulo "Desempenho" sem ocupar
+  altura, pelo mesmo motivo das abas.
 - Serviços e Inicialização são **abas** dentro de "Processos" (`ui::system_tabs`): mais
   itens na barra lateral não cabem em 768 px sem rolar os cartões.
 - `src/services.rs`: thread criada na primeira visita à tela; relê a lista a cada 3 s só

@@ -274,6 +274,26 @@ fn general(app: &mut App, ui: &mut Ui) {
                 }
             },
         );
+        // A chave vale para o PC inteiro, mas o exe está na pasta deste usuário: os
+        // outros usuários ficariam sem Gerenciador de Tarefas nenhum.
+        if crate::platform::installed_per_user() {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon::WARNING).font(theme::regular(14.0)).color(theme::ACCENT));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Instalado só para o seu usuário, mas a troca vale para todos do computador: \
+                             os outros usuários ficariam sem Gerenciador de Tarefas. Se o PC é compartilhado, \
+                             reinstale escolhendo \"para todos os usuários\".",
+                        )
+                        .font(theme::regular(12.0))
+                        .color(INK_2),
+                    )
+                    .wrap(),
+                );
+            });
+        }
     });
 
     ui.add_space(16.0);

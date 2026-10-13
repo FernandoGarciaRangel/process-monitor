@@ -33,6 +33,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     ui.add_space(12.0);
     widgets::section_label(ui, "Desempenho");
+    // Pintada na linha do rótulo, sem ocupar altura: os cartões têm que caber em 768 px.
+    if let Some(b) = app.snap.as_ref().and_then(|s| s.battery) {
+        battery(ui, b, ui.max_rect().right(), ui.cursor().top() - ui.spacing().item_spacing.y);
+    }
     ui.add_space(4.0);
 
     // Os cartões rolam se a janela for baixa e houver várias GPUs; o rodapé fica fixo.
@@ -125,6 +129,32 @@ fn resource_cards(app: &mut App, ui: &mut Ui, s: &Snapshot) {
             app.view = View::Gpu(i);
         }
     }
+}
+
+/// Carga da bateria, discreta à direita do título da seção; o detalhe fica na dica.
+/// `bottom` é a base da linha do rótulo.
+fn battery(ui: &mut Ui, b: crate::platform::Battery, right: f32, bottom: f32) {
+    let glyph = match (b.charging, b.percent) {
+        (true, _) => icon::BATTERY_CHARGING,
+        (_, 0..=10) => icon::BATTERY_WARNING,
+        (_, 11..=35) => icon::BATTERY_LOW,
+        (_, 36..=65) => icon::BATTERY_MEDIUM,
+        (_, 66..=90) => icon::BATTERY_HIGH,
+        _ => icon::BATTERY_FULL,
+    };
+    // Pouca carga fora da tomada é o único caso que pede atenção.
+    let color = if b.percent <= 15 && !b.plugged { theme::DANGER } else { INK_3 };
+    let tip = match (b.charging, b.plugged, b.secs_left) {
+        (true, _, _) => format!("Bateria em {}%, carregando", b.percent),
+        (false, true, _) => format!("Bateria em {}%, na tomada", b.percent),
+        (false, false, Some(secs)) => format!("Bateria em {}%, cerca de {} restantes", b.percent, format::duration(secs as u64)),
+        (false, false, None) => format!("Bateria em {}%", b.percent),
+    };
+    let y = bottom - 7.0;
+    let p = ui.painter();
+    let text = p.text(pos2(right, y), Align2::RIGHT_CENTER, format!("{}%", b.percent), theme::regular(10.5), color);
+    let mark = p.text(pos2(text.left() - 4.0, y), Align2::RIGHT_CENTER, glyph, theme::regular(12.0), color);
+    ui.interact(mark.union(text), ui.id().with("battery"), Sense::hover()).on_hover_text(tip);
 }
 
 fn brand(app: &mut App, ui: &mut Ui) {

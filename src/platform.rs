@@ -276,6 +276,13 @@ fn task_manager_debugger() -> Option<String> {
     }
 }
 
+/// Instalado só para este usuário (`%LOCALAPPDATA%\Programs`), em vez de em Arquivos
+/// de Programas para todos.
+pub fn installed_per_user() -> bool {
+    let (Ok(exe), Some(local)) = (std::env::current_exe(), std::env::var_os("LOCALAPPDATA")) else { return false };
+    exe.to_string_lossy().to_lowercase().starts_with(&local.to_string_lossy().to_lowercase())
+}
+
 /// Este exe está registrado no lugar do Gerenciador de Tarefas?
 pub fn replaces_task_manager() -> bool {
     let Ok(exe) = std::env::current_exe() else { return false };
@@ -422,6 +429,32 @@ pub fn open_in_explorer(path: &Path) {
     let _ = std::process::Command::new("explorer.exe")
         .raw_arg(format!("/select,\"{}\"", path.display()))
         .spawn();
+}
+
+/// Bateria do notebook. `None` em desktop ou quando o Windows não sabe a carga.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Battery {
+    pub percent: u8,
+    /// Na tomada (pode estar cheia, sem carregar).
+    pub plugged: bool,
+    pub charging: bool,
+    /// Tempo restante na bateria; o Windows só estima fora da tomada.
+    pub secs_left: Option<u32>,
+}
+
+pub fn battery() -> Option<Battery> {
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    let mut status = SYSTEM_POWER_STATUS::default();
+    unsafe { GetSystemPowerStatus(&mut status).ok()? };
+    battery_from(status.ACLineStatus, status.BatteryFlag, status.BatteryLifePercent, status.BatteryLifeTime)
+}
+
+/// 128 em `flag` = sem bateria; 255 = desconhecido. 8 = carregando.
+fn battery_from(ac_line: u8, flag: u8, percent: u8, secs: u32) -> Option<Battery> {
+    if flag == 255 || flag & 128 != 0 || percent > 100 {
+        return None;
+    }
+    Some(Battery { percent, plugged: ac_line == 1, charging: flag & 8 != 0, secs_left: (secs != u32::MAX).then_some(secs) })
 }
 
 /// Pasta Downloads do usuário, mesmo redirecionada (OneDrive, outra unidade).
@@ -756,6 +789,16 @@ mod tests {
         assert!(!other_copy(r#""c:\program files\process monitor\PROCESS-MONITOR.EXE""#, exe));
         // Process Explorer ou outro programa: não é nosso, não se mexe.
         assert!(!other_copy(r#""C:\Tools\procexp64.exe""#, exe));
+    }
+
+    #[test]
+    fn bateria() {
+        assert_eq!(battery_from(1, 128, 255, u32::MAX), None, "desktop");
+        assert_eq!(battery_from(255, 255, 255, u32::MAX), None, "desconhecido");
+        let b = battery_from(1, 8, 64, u32::MAX).unwrap();
+        assert_eq!((b.percent, b.plugged, b.charging, b.secs_left), (64, true, true, None));
+        let b = battery_from(0, 0, 80, 5400).unwrap();
+        assert_eq!((b.plugged, b.charging, b.secs_left), (false, false, Some(5400)));
     }
 
     #[test]

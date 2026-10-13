@@ -353,7 +353,7 @@ fn proc_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, p: &ProcInfo, child: b
             let texture = app.icons.get(p.exe.as_deref());
             widgets::process_icon(ui, texture.as_ref(), 16.0);
             ui.add_space(4.0);
-            if app.suspended.contains(&p.key()) {
+            if p.suspended {
                 suspended_pill(ui);
             }
             name_label(ui, p.display_name(), p.exe_hint(), theme::regular(13.0));
@@ -444,7 +444,7 @@ fn proc_menu(app: &mut App, ui: &mut Ui, p: &ProcInfo, actions: &mut Vec<Action>
     if protected {
         ui.label(RichText::new("Processo crítico do sistema").font(theme::regular(11.5)).color(INK_3));
     }
-    let suspended = app.suspended.contains(&p.key());
+    let suspended = p.suspended;
     let blocked = crate::control::suspend_blocked(p.pid, &p.name);
     let (glyph, text) = if suspended { (icon::PLAY, "Retomar") } else { (icon::PAUSE, "Suspender") };
     let button = ui.add_enabled(suspended || blocked.is_none(), egui::Button::new(format!("{glyph}  {text}")));

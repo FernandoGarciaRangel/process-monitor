@@ -336,9 +336,6 @@ pub struct App {
     /// Alvo do último alerta mostrado, escrito pela thread da coleta.
     last_alert: Arc<std::sync::Mutex<Option<alerts::Target>>>,
 
-    /// Processos suspensos por este app. Ficam salvos entre execuções: um processo
-    /// esquecido suspenso continua marcado depois de reabrir ou atualizar o app.
-    pub suspended: HashSet<ProcKey>,
     /// Prioridade, núcleos e modo eficiência do selecionado, lidos uma vez por seleção.
     tuning: Option<(ProcKey, control::Tuning)>,
     /// Criado na primeira vez que a tela de serviços abre.
@@ -365,7 +362,6 @@ const ON_TOP_KEY: &str = "always_on_top";
 const PROBE_HTTP_KEY: &str = "probe_http";
 const HIDDEN_COLUMNS_KEY: &str = "hidden_columns";
 const HISTORY_WINDOW_KEY: &str = "history_window";
-const SUSPENDED_KEY: &str = "suspended";
 
 /// Tabelas com largura de coluna salva (ver `ui::columns`).
 pub const TABLES: [&str; 4] = ["processes", "ports", "services", "startup"];
@@ -462,7 +458,6 @@ impl App {
             quitting: false,
             alert_config,
             last_alert: Arc::default(),
-            suspended: stored(SUSPENDED_KEY).map(|v| parse_keys(&v)).unwrap_or_default(),
             tuning: None,
             services: None,
             service_search: String::new(),
@@ -964,23 +959,20 @@ impl App {
     pub fn toggle_suspend(&mut self, key: ProcKey) {
         let Some(proc) = self.snap.as_ref().and_then(|s| s.find(key)).cloned() else { return };
         let label = proc.display_name().to_owned();
-        if self.suspended.contains(&key) {
+        // O estado vem da coleta (as threads do processo), então vale também para quem
+        // foi suspenso por outro programa. Coleta já para a tela refletir a mudança.
+        if proc.suspended {
             match control::resume(key, &proc.name) {
-                Ok(()) | Err(KillError::NotFound) => {
-                    self.suspended.remove(&key);
-                    self.toast(format!("{label} retomado"), ToastKind::Ok, false);
-                }
+                Ok(()) | Err(KillError::NotFound) => self.toast(format!("{label} retomado"), ToastKind::Ok, false),
                 Err(e) => self.control_error(&format!("Não retomou {label}"), e),
             }
         } else {
             match control::suspend(key, &proc.name) {
-                Ok(()) => {
-                    self.suspended.insert(key);
-                    self.toast(format!("{label} suspenso até você retomar"), ToastKind::Ok, false);
-                }
+                Ok(()) => self.toast(format!("{label} suspenso até você retomar"), ToastKind::Ok, false),
                 Err(e) => self.control_error(&format!("Não suspendeu {label}"), e),
             }
         }
+        self.sampler.refresh_now();
     }
 
     fn control_error(&mut self, what: &str, e: KillError) {
@@ -1101,7 +1093,6 @@ impl App {
     fn record_histories(&mut self, snap: &Snapshot) {
         let alive: HashSet<ProcKey> = snap.processes.iter().map(|p| p.key()).collect();
         self.histories.retain(|k, _| alive.contains(k));
-        self.suspended.retain(|k| alive.contains(k));
         for p in &snap.processes {
             let h = self.histories.entry(p.key()).or_insert_with(ProcHistory::new);
             h.cpu.push(p.cpu);
@@ -1371,7 +1362,6 @@ impl eframe::App for App {
         storage.set_string(PROBE_HTTP_KEY, if self.probe_http { "1" } else { "0" }.to_owned());
         storage.set_string(HIDDEN_COLUMNS_KEY, self.hidden_columns.iter().cloned().collect::<Vec<_>>().join(","));
         storage.set_string(HISTORY_WINDOW_KEY, self.history_window.minutes().to_string());
-        storage.set_string(SUSPENDED_KEY, keys_text(&self.suspended));
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -1475,22 +1465,6 @@ fn read_autostart() -> (bool, bool) {
     (true, minimized)
 }
 
-/// Processos como se guardam: "1234:1760000000,5678:1760000100" (PID e hora de criação).
-fn keys_text(keys: &HashSet<ProcKey>) -> String {
-    let mut list: Vec<String> = keys.iter().map(|k| format!("{}:{}", k.pid, k.start)).collect();
-    list.sort();
-    list.join(",")
-}
-
-fn parse_keys(text: &str) -> HashSet<ProcKey> {
-    text.split(',')
-        .filter_map(|item| {
-            let (pid, start) = item.trim().split_once(':')?;
-            Some(ProcKey { pid: pid.parse().ok()?, start: start.parse().ok()? })
-        })
-        .collect()
-}
-
 fn window_level(on_top: bool) -> egui::WindowLevel {
     if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal }
 }
@@ -1524,10 +1498,5 @@ mod tests {
         for key in PortSort::ALL {
             assert_eq!(PortSort::ALL.into_iter().find(|k| k.key() == key.key()), Some(key));
         }
-        let suspended: HashSet<ProcKey> =
-            [ProcKey { pid: 12, start: 1_760_000_000 }, ProcKey { pid: 7, start: 1_760_000_100 }].into();
-        assert_eq!(parse_keys(&keys_text(&suspended)), suspended);
-        assert_eq!(parse_keys("x, 1:a, 5:9"), [ProcKey { pid: 5, start: 9 }].into());
-        assert!(parse_keys("").is_empty());
     }
 }

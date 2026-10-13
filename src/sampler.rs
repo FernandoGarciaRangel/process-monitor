@@ -108,6 +108,8 @@ pub struct ProcInfo {
     pub disk_total_read: u64,
     pub disk_total_written: u64,
     pub gpu: f32,
+    /// Todas as threads suspensas (por este app, por outro ou pelo Windows).
+    pub suspended: bool,
 }
 
 impl ProcInfo {
@@ -233,6 +235,7 @@ pub struct Snapshot {
     pub net_adapters: Vec<String>,
 
     pub gpus: Vec<GpuInfo>,
+    pub battery: Option<platform::Battery>,
     pub processes: Vec<ProcInfo>,
     /// Portas TCP em escuta, lidas no mesmo instante que os processos.
     pub listeners: Vec<Listener>,
@@ -393,6 +396,8 @@ fn run(
     let mut alerts = Alerts::default();
     let mut alert_config = alerts::Config::default();
     let mut alert_sink: Option<AlertSink> = None;
+    // Buffer da leitura de threads, reaproveitado: tem centenas de KB.
+    let mut threads_buf: Vec<u8> = Vec::new();
     let own_pid = std::process::id();
 
     let host = System::host_name().unwrap_or_default();
@@ -418,6 +423,7 @@ fn run(
         disks.refresh_specifics(true, disk_kind);
         networks.refresh(true);
         let gpu_sample = gpu.as_mut().map(|g| g.sample()).unwrap_or_default();
+        let suspended = crate::control::suspended_pids(&mut threads_buf);
 
         let logical = sys.cpus().len().max(1) as f32;
         let cores: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
@@ -457,6 +463,7 @@ fn run(
                     disk_total_read: disk.total_read_bytes,
                     disk_total_written: disk.total_written_bytes,
                     gpu: gpu_sample.per_process.get(&p.pid().as_u32()).copied().unwrap_or(0.0),
+                    suspended: suspended.contains(&p.pid().as_u32()),
                 }
             })
             .collect();
@@ -555,6 +562,7 @@ fn run(
             net_tx_total: tx_total,
             net_adapters: active.into_iter().take(4).map(|(n, _)| n).collect(),
             gpus,
+            battery: platform::battery(),
             processes,
             listeners: ports::listeners(),
             connections: ports::connections(),
@@ -691,6 +699,7 @@ pub(crate) mod tests {
             disk_total_read: 0,
             disk_total_written: 0,
             gpu: 0.0,
+            suspended: false,
         }
     }
 
