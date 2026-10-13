@@ -115,12 +115,14 @@ enum Action {
     Kill(ProcKey),
     KillTree(ProcKey),
     KillGroup(String),
+    Suspend(ProcKey),
     ToggleGroup(String),
     Explore(PathBuf),
     Copy(String),
 }
 
 pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
+    super::system_tabs(app, ui);
     let terms = search_terms(&app.search);
     let visible: Vec<&ProcInfo> = snap.processes.iter().filter(|p| matches(p, &terms)).collect();
     let rows = build_rows(app, &visible, !terms.is_empty());
@@ -230,6 +232,7 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
             Action::Kill(key) => app.request_kill(key, false),
             Action::KillTree(key) => app.request_kill(key, true),
             Action::KillGroup(name) => app.request_kill_group(&name),
+            Action::Suspend(key) => app.toggle_suspend(key),
             Action::ToggleGroup(name) => {
                 if !app.expanded.remove(&name) {
                     app.expanded.insert(name);
@@ -350,6 +353,9 @@ fn proc_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, p: &ProcInfo, child: b
             let texture = app.icons.get(p.exe.as_deref());
             widgets::process_icon(ui, texture.as_ref(), 16.0);
             ui.add_space(4.0);
+            if app.suspended.contains(&p.key()) {
+                suspended_pill(ui);
+            }
             name_label(ui, p.display_name(), p.exe_hint(), theme::regular(13.0));
         }
         Col::Pid => widgets::right_text(ui, &p.pid.to_string(), INK_3),
@@ -400,6 +406,16 @@ fn name_label(ui: &mut Ui, primary: &str, hint: Option<&str>, font: egui::FontId
     ui.add(egui::Label::new(job).truncate());
 }
 
+/// "Suspenso" antes do nome: o processo não roda nada até ser retomado.
+pub(super) fn suspended_pill(ui: &mut Ui) {
+    let text = format!("{}  suspenso", icon::PAUSE);
+    let galley = ui.painter().layout_no_wrap(text, theme::regular(11.0), theme::ACCENT);
+    let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 12.0, 18.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(9), theme::ACCENT.gamma_multiply(0.14));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, theme::ACCENT);
+    ui.add_space(2.0);
+}
+
 fn count_pill(ui: &mut Ui, n: usize) {
     let text = n.to_string();
     let font = theme::regular(11.0);
@@ -427,6 +443,18 @@ fn proc_menu(app: &mut App, ui: &mut Ui, p: &ProcInfo, actions: &mut Vec<Action>
     }
     if protected {
         ui.label(RichText::new("Processo crítico do sistema").font(theme::regular(11.5)).color(INK_3));
+    }
+    let suspended = app.suspended.contains(&p.key());
+    let blocked = crate::control::suspend_blocked(p.pid, &p.name);
+    let (glyph, text) = if suspended { (icon::PLAY, "Retomar") } else { (icon::PAUSE, "Suspender") };
+    let button = ui.add_enabled(suspended || blocked.is_none(), egui::Button::new(format!("{glyph}  {text}")));
+    let button = match blocked {
+        Some(reason) if !suspended => button.on_disabled_hover_text(reason),
+        _ => button.on_hover_text("Congela o processo sem finalizar: ele não usa CPU até ser retomado"),
+    };
+    if button.clicked() {
+        actions.push(Action::Suspend(p.key()));
+        ui.close();
     }
     ui.separator();
     if let Some(exe) = &p.exe {

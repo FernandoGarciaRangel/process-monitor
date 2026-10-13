@@ -194,6 +194,23 @@ para o clique no balão abrir o processo ou a porta.
 e executáveis em execução, sem administrador. O resultado vem com PID e hora de
 criação; case com a coleta pelos dois (±2 s), nunca só pelo PID.
 
+## Ajustes de processo, serviços e inicialização
+
+- `src/control.rs`: suspender e retomar (`NtSuspendProcess` pelo ntdll), prioridade,
+  afinidade e modo eficiência (EcoQoS e prioridade baixa, como o Gerenciador de Tarefas).
+  Tudo confere a hora de criação, como o `kill`. `dwm.exe`, `explorer.exe` e os críticos
+  não suspendem: a sessão congelaria sem como retomar. Tempo real fica de fora de propósito.
+- O Windows não diz se um processo foi suspenso. `App::suspended` guarda os que este app
+  suspendeu e é salvo entre execuções (PID + hora de criação).
+- Serviços e Inicialização são **abas** dentro de "Processos" (`ui::system_tabs`): mais
+  itens na barra lateral não cabem em 768 px sem rolar os cartões.
+- `src/services.rs`: thread criada na primeira visita à tela; relê a lista a cada 3 s só
+  com ela aberta. O tipo de inicialização fica em cache (uma chamada por serviço).
+- `src/startup.rs`: ligar e desligar escreve em `Explorer\StartupApproved`, o mesmo do
+  Gerenciador de Tarefas. A lista é lida numa thread: a descrição de cada exe pode demorar.
+- "Liberar porta" de um servidor de desenvolvimento finaliza a árvore desde
+  `server_root`; a tela de portas avisa de projeto rodando duas vezes (`ports::conflicts`).
+
 ## Windows em português
 
 O Windows devolve nomes localizados: a conta `S-1-5-18` é "SISTEMA", as descrições

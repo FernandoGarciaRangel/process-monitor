@@ -111,6 +111,36 @@ pub fn dividers<C: TableCol>(ui: &mut Ui, salt: &str, cols: &[C], cells: &[Rect]
     }
 }
 
+/// Coluna e sentido da ordenação de uma tabela, salvos entre execuções.
+pub fn sort_state(ui: &Ui, salt: &str, default: (&str, bool)) -> (String, bool) {
+    ui.data_mut(|d| d.get_persisted(Id::new(("column_sort", salt)))).unwrap_or((default.0.to_owned(), default.1))
+}
+
+/// Cabeçalho que ordena: a seta fica do lado de dentro da coluna ativa. Clicar na ativa
+/// inverte o sentido; em outra, ordena por ela no sentido `desc_first`.
+pub fn sort_header<C: TableCol>(ui: &mut Ui, salt: &str, col: C, label: &str, right: bool, desc_first: bool, sort: &(String, bool)) {
+    use crate::theme::{self, HAIRLINE, INK_2, INK_3};
+    let rect = ui.max_rect();
+    let response = ui.interact(rect, ui.id().with(("sort", col.key())), Sense::click());
+    let active = sort.0 == col.key();
+    let caret = if sort.1 { egui_phosphor::regular::CARET_DOWN } else { egui_phosphor::regular::CARET_UP };
+    let text = match (active, right) {
+        (true, true) => format!("{caret} {label}"),
+        (true, false) => format!("{label} {caret}"),
+        (false, _) => label.to_owned(),
+    };
+    let color = if active || response.hovered() { INK_2 } else { INK_3 };
+    let (x, align) =
+        if right { (rect.right() - 10.0, egui::Align2::RIGHT_BOTTOM) } else { (rect.left() + 8.0, egui::Align2::LEFT_BOTTOM) };
+    let painter = ui.painter();
+    painter.text(pos2(x, rect.bottom() - 7.0), align, text, theme::regular(11.5), color);
+    painter.hline(rect.x_range(), rect.bottom() - 0.5, egui::Stroke::new(1.0, HAIRLINE));
+    if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+        let next = if active { (sort.0.clone(), !sort.1) } else { (col.key().to_owned(), desc_first) };
+        ui.data_mut(|d| d.insert_persisted(Id::new(("column_sort", salt)), next));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

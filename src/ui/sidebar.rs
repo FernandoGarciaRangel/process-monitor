@@ -16,7 +16,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     ui.add_space(14.0);
 
     let count = app.snap.as_ref().map(|s| s.processes.len()).unwrap_or(0);
-    if nav_item(ui, app.view == View::Processes, icon::LIST_BULLETS, "Processos", &count.to_string()).clicked() {
+    // Serviços e Inicialização são abas dentro de Processos.
+    if nav_item(ui, app.view.is_system(), icon::LIST_BULLETS, "Processos", &count.to_string()).clicked() && !app.view.is_system()
+    {
         app.view = View::Processes;
     }
     // O contador acompanha o filtro da tela: só desenvolvimento e faixas, ou todas.

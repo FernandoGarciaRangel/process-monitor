@@ -20,7 +20,7 @@ use windows::Win32::NetworkManagement::IpHelper::{
     TCP_TABLE_CLASS, TCP_TABLE_OWNER_PID_CONNECTIONS, TCP_TABLE_OWNER_PID_LISTENER,
 };
 
-use crate::sampler::{ProcInfo, Series};
+use crate::sampler::{ProcInfo, ProcKey, Series};
 
 const AF_INET: u32 = 2;
 const AF_INET6: u32 = 23;
@@ -392,6 +392,71 @@ pub fn project_label(dir: &Path) -> Option<String> {
         return Some(format!("{parent}\\{last}"));
     }
     Some(last.into_owned())
+}
+
+// ── Conflitos ──────────────────────────────────────────────────────────────
+
+/// Situação na lista de portas que costuma explicar um "por que o servidor subiu na
+/// porta errada?".
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Conflict {
+    /// Mais de um processo escuta a mesma porta (um no IPv4, outro no IPv6, por exemplo):
+    /// quem conecta cai num ou noutro conforme o endereço.
+    SharedPort { port: u16, pids: Vec<u32> },
+    /// O mesmo projeto rodando duas vezes. Quase sempre uma instância antiga ficou presa
+    /// na porta padrão e a nova pulou para a vizinha (o Vite vai de 5173 para 5174).
+    Duplicate { project: String, kind: Kind, old: (u16, ProcKey), new: (u16, ProcKey) },
+}
+
+/// Conflitos entre as portas em escuta. `parent_of` é o do snapshot (pais com PID
+/// reaproveitado não contam): duas portas da mesma árvore são um servidor só.
+pub fn conflicts<'a>(
+    listeners: &[Listener],
+    processes: &'a [ProcInfo],
+    parent_of: impl Fn(&ProcInfo) -> Option<&'a ProcInfo> + Copy,
+) -> Vec<Conflict> {
+    let mut out = Vec::new();
+    let mut by_port: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
+    for l in listeners {
+        by_port.entry(l.port).or_default().push(l.pid);
+    }
+    for (port, mut pids) in by_port {
+        pids.sort_unstable();
+        pids.dedup();
+        // PID 0 e 4 são o kernel (http.sys): dividir porta com ele é normal.
+        if pids.iter().filter(|&&p| p > 4).count() >= 2 {
+            out.push(Conflict::SharedPort { port, pids });
+        }
+    }
+
+    // Servidores agrupados por plataforma e pasta do projeto; dentro do grupo, por raiz.
+    let procs: HashMap<u32, &ProcInfo> = processes.iter().map(|p| (p.pid, p)).collect();
+    // (plataforma, pasta) → (plataforma, nome do projeto, raiz → menor porta).
+    type Group = (Kind, String, HashMap<ProcKey, u16>);
+    let mut groups: BTreeMap<(String, String), Group> = BTreeMap::new();
+    for l in listeners {
+        let Some(&p) = procs.get(&l.pid) else { continue };
+        let Some(kind) = classify(p) else { continue };
+        let Some(dir) = project_dir(p) else { continue };
+        let root = server_root(p, parent_of);
+        let label = project_label(&dir).unwrap_or_else(|| dir.display().to_string());
+        let entry = groups
+            .entry((kind.label().to_owned(), normalized(&dir.to_string_lossy())))
+            .or_insert_with(|| (kind, label, HashMap::new()));
+        let port = entry.2.entry(root.key()).or_insert(l.port);
+        *port = (*port).min(l.port);
+    }
+    for (_, (kind, project, roots)) in groups {
+        if roots.len() < 2 {
+            continue;
+        }
+        let oldest = roots.iter().min_by_key(|(k, _)| (k.start, k.pid)).map(|(k, p)| (*p, *k));
+        let newest = roots.iter().max_by_key(|(k, _)| (k.start, k.pid)).map(|(k, p)| (*p, *k));
+        if let (Some(old), Some(new)) = (oldest, newest) {
+            out.push(Conflict::Duplicate { project, kind, old, new });
+        }
+    }
+    out
 }
 
 fn normalized(s: &str) -> String {
@@ -834,6 +899,34 @@ mod tests {
         let mut p = proc(1, None, 1, "node.exe");
         p.cmd = cmd.to_owned();
         p
+    }
+
+    fn listening(port: u16, pid: u32) -> Listener {
+        Listener { port, pid, addrs: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)] }
+    }
+
+    #[test]
+    fn conflitos_de_porta() {
+        let vite_cmd = r"C:\Repos\loja\node_modules\vite\bin\vite.js";
+        let mut old = proc(10, None, 100, "node.exe");
+        old.cmd = format!("node {vite_cmd}");
+        let mut new = proc(20, None, 500, "node.exe");
+        new.cmd = format!("node {vite_cmd}");
+        // Filho do novo, na mesma árvore: não é uma terceira instância.
+        let mut child = proc(21, Some(20), 501, "node.exe");
+        child.cmd = format!("node {vite_cmd}");
+        let other = proc(30, None, 50, "python.exe");
+        let procs = vec![old, new, child, other];
+        let parent_of = |c: &ProcInfo| procs.iter().find(|p| Some(p.pid) == c.parent && p.start_time <= c.start_time);
+        let listeners = [listening(5173, 10), listening(5174, 20), listening(24678, 21), listening(8000, 30), listening(8000, 4)];
+        let found = conflicts(&listeners, &procs, parent_of);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let Conflict::Duplicate { project, kind, old, new } = &found[0] else { panic!() };
+        assert_eq!((project.as_str(), *kind), ("loja", Kind::Vite));
+        assert_eq!((old.0, old.1.pid, new.0, new.1.pid), (5173, 10, 5174, 20));
+
+        let shared = [listening(3000, 40), listening(3000, 41)];
+        assert_eq!(conflicts(&shared, &procs, parent_of), vec![Conflict::SharedPort { port: 3000, pids: vec![40, 41] }]);
     }
 
     #[test]

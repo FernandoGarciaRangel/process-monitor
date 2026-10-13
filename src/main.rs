@@ -3,6 +3,8 @@
 
 mod alerts;
 mod app;
+mod control;
+mod export;
 mod format;
 mod gpu;
 mod icons;
@@ -10,6 +12,8 @@ mod locks;
 mod platform;
 mod ports;
 mod sampler;
+mod services;
+mod startup;
 mod theme;
 mod tray;
 mod ui;

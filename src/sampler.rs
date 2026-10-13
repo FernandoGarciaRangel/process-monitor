@@ -563,7 +563,14 @@ fn run(
         };
 
         if let Some(sink) = &alert_sink {
-            let fired = alerts.evaluate(Instant::now(), &snapshot.processes, &snapshot.listeners, &alert_config, own_pid);
+            let fired = alerts.evaluate(
+                Instant::now(),
+                &snapshot.processes,
+                &snapshot.listeners,
+                &snapshot.disks,
+                &alert_config,
+                own_pid,
+            );
             for alert in &fired {
                 sink(alert);
             }

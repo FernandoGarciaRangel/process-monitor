@@ -17,7 +17,7 @@ use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAGS_AND_ATTRIBUTES, GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
 };
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
@@ -26,8 +26,8 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::UI::Shell::{
-    SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW,
-    ShellExecuteExW, ShellExecuteW,
+    FOLDERID_Downloads, KF_FLAG_DEFAULT, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_ICON,
+    SHGFI_LARGEICON, SHGetFileInfoW, SHGetKnownFolderPath, ShellExecuteExW, ShellExecuteW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -410,6 +410,17 @@ pub fn open_in_explorer(path: &Path) {
         .spawn();
 }
 
+/// Pasta Downloads do usuário, mesmo redirecionada (OneDrive, outra unidade).
+pub fn downloads_dir() -> Option<std::path::PathBuf> {
+    unsafe {
+        let path = SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None).ok()?;
+        let text = path.to_string().ok();
+        CoTaskMemFree(Some(path.0 as *const _));
+        text.map(std::path::PathBuf::from)
+    }
+    .or_else(|| std::env::var_os("USERPROFILE").map(|p| Path::new(&p).join("Downloads")))
+}
+
 /// Abre uma URL no navegador padrão, ou uma pasta no Explorer.
 pub fn shell_open(target: &str) {
     unsafe {
@@ -556,7 +567,7 @@ pub fn account_name(sid: &str) -> Option<String> {
 }
 
 /// Hora de criação em segundos Unix.
-unsafe fn creation_time(handle: HANDLE) -> Option<u64> {
+pub(crate) unsafe fn creation_time(handle: HANDLE) -> Option<u64> {
     let (mut created, mut exit, mut kernel, mut user) =
         (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
     unsafe { GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user).ok()? };
@@ -570,7 +581,7 @@ pub fn filetime_to_unix(time: FILETIME) -> Option<u64> {
     ticks.checked_sub(UNIX_EPOCH_TICKS).map(|t| t / 10_000_000)
 }
 
-fn open_error(e: windows::core::Error) -> KillError {
+pub(crate) fn open_error(e: windows::core::Error) -> KillError {
     if e.code() == ERROR_ACCESS_DENIED.to_hresult() {
         KillError::AccessDenied
     } else if e.code() == ERROR_INVALID_PARAMETER.to_hresult() {
@@ -580,7 +591,7 @@ fn open_error(e: windows::core::Error) -> KillError {
     }
 }
 
-struct HandleGuard(HANDLE);
+pub(crate) struct HandleGuard(pub(crate) HANDLE);
 
 impl Drop for HandleGuard {
     fn drop(&mut self) {

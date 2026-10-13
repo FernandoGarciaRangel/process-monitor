@@ -183,6 +183,7 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
     let visible: HashSet<(u16, u32)> = rows.iter().map(|r| (r.l.port, r.l.pid)).collect();
     ranges_bar(app, ui, snap, &procs, &statuses, &visible, &mut actions);
     ui.add_space(12.0);
+    conflicts_banner(app, ui, snap, &procs, &mut actions);
     keyboard(app, ui, &rows, selected, &mut actions);
 
     if rows.is_empty() {
@@ -388,6 +389,82 @@ fn chip(
             response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tip)
         }
     }
+}
+
+/// Avisos acima da tabela: o mesmo projeto rodando duas vezes (a instância nova pulou de
+/// porta) e portas com mais de um dono. Sem "Todas", só o que envolve desenvolvimento
+/// ou as faixas, como a própria lista.
+fn conflicts_banner(app: &mut App, ui: &mut Ui, snap: &Snapshot, procs: &HashMap<u32, &ProcInfo>, actions: &mut Vec<Action>) {
+    let relevant = |port: u16, pids: &[u32]| {
+        app.ports_all
+            || ports::in_ranges(&app.port_ranges, port)
+            || pids.iter().any(|pid| procs.get(pid).is_some_and(|p| ports::classify(p).is_some()))
+    };
+    let found: Vec<ports::Conflict> = ports::conflicts(&snap.listeners, &snap.processes, |c| snap.parent_of(c))
+        .into_iter()
+        .filter(|c| match c {
+            ports::Conflict::SharedPort { port, pids } => relevant(*port, pids),
+            ports::Conflict::Duplicate { .. } => true,
+        })
+        .take(3)
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    let name = |pid: u32| procs.get(&pid).map(|p| p.display_name().to_owned()).unwrap_or_else(|| "?".to_owned());
+    for conflict in found {
+        widgets::card().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon::WARNING).font(theme::regular(16.0)).color(theme::ACCENT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let text = match &conflict {
+                        ports::Conflict::Duplicate { project, kind, old, new } => {
+                            let (old_port, old_key) = *old;
+                            let (new_port, new_key) = *new;
+                            if widgets::danger_button(ui, &format!("Liberar {old_port}"), true)
+                                .on_hover_text("Finalizar a instância antiga")
+                                .clicked()
+                            {
+                                actions.push(Action::Kill(old_key, old_port));
+                            }
+                            if widgets::ghost_button(ui, "Ver").clicked() {
+                                actions.push(Action::Select(old_key, old_port));
+                                app.scroll_to_port = true;
+                            }
+                            let age = |k: ProcKey| procs.get(&k.pid).map(|p| format::duration(p.run_time)).unwrap_or_default();
+                            format!(
+                                "{project} ({}) está rodando duas vezes: a porta {old_port} é de uma instância aberta há {}, \
+                                 e a de {} subiu na {new_port}.",
+                                kind.label(),
+                                age(old_key),
+                                age(new_key),
+                            )
+                        }
+                        ports::Conflict::SharedPort { port, pids } => {
+                            if let Some(key) = pids.iter().find_map(|pid| procs.get(pid).map(|p| p.key()))
+                                && widgets::ghost_button(ui, "Ver").clicked()
+                            {
+                                actions.push(Action::Select(key, *port));
+                                app.scroll_to_port = true;
+                            }
+                            let owners: Vec<String> = pids.iter().map(|pid| format!("{} (PID {pid})", name(*pid))).collect();
+                            format!(
+                                "A porta {port} tem {} donos: {}. Quem conecta cai num ou noutro conforme o endereço (IPv4 ou IPv6).",
+                                pids.len(),
+                                owners.join(", ")
+                            )
+                        }
+                    };
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.add(egui::Label::new(RichText::new(text).font(theme::regular(12.5)).color(INK_2)).wrap());
+                    });
+                });
+            });
+        });
+        ui.add_space(8.0);
+    }
+    ui.add_space(4.0);
 }
 
 /// Ícone que abre o campo das faixas. Texto inválido fica no campo com o erro embaixo.

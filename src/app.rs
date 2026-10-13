@@ -8,6 +8,7 @@ use egui::{Align2, Color32, CornerRadius, Frame, Id, Margin, RichText, Stroke, v
 use egui_phosphor::regular as icon;
 
 use crate::icons::IconCache;
+use crate::{control, export, services};
 use crate::platform::{self, KillError};
 use crate::ports::{self, Kind, PortRange, Prober, Statuses, Target};
 use crate::sampler::{ProcInfo, ProcKey, Sampler, Series, Snapshot};
@@ -21,6 +22,8 @@ use crate::updater::{self, Updater};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
     Processes,
+    Services,
+    Startup,
     Ports,
     Cpu,
     Memory,
@@ -34,6 +37,8 @@ impl View {
     fn key(self) -> String {
         match self {
             View::Processes => "processes".to_owned(),
+            View::Services => "services".to_owned(),
+            View::Startup => "startup".to_owned(),
             View::Ports => "ports".to_owned(),
             View::Cpu => "cpu".to_owned(),
             View::Memory => "memory".to_owned(),
@@ -46,6 +51,8 @@ impl View {
     fn from_key(key: &str) -> Option<Self> {
         Some(match key {
             "processes" => View::Processes,
+            "services" => View::Services,
+            "startup" => View::Startup,
             "ports" => View::Ports,
             "cpu" => View::Cpu,
             "memory" => View::Memory,
@@ -53,6 +60,11 @@ impl View {
             "network" => View::Network,
             _ => View::Gpu(key.strip_prefix("gpu:")?.parse().ok()?),
         })
+    }
+
+    /// Telas que dividem o item "Processos" da barra lateral, em abas.
+    pub fn is_system(self) -> bool {
+        matches!(self, View::Processes | View::Services | View::Startup)
     }
 }
 
@@ -146,6 +158,15 @@ impl KillTarget {
     fn of(p: &crate::sampler::ProcInfo) -> Self {
         Self { key: p.key(), exe: p.name.clone(), label: p.display_name().to_owned() }
     }
+}
+
+/// Ajuste pedido no painel de detalhes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tune {
+    Priority(control::Priority),
+    /// Máscara de núcleos lógicos.
+    Affinity(u64),
+    Efficiency(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -314,6 +335,17 @@ pub struct App {
     pub alert_config: alerts::Config,
     /// Alvo do último alerta mostrado, escrito pela thread da coleta.
     last_alert: Arc<std::sync::Mutex<Option<alerts::Target>>>,
+
+    /// Processos suspensos por este app. Ficam salvos entre execuções: um processo
+    /// esquecido suspenso continua marcado depois de reabrir ou atualizar o app.
+    pub suspended: HashSet<ProcKey>,
+    /// Prioridade, núcleos e modo eficiência do selecionado, lidos uma vez por seleção.
+    tuning: Option<(ProcKey, control::Tuning)>,
+    /// Criado na primeira vez que a tela de serviços abre.
+    pub services: Option<services::Manager>,
+    pub service_search: String,
+    pub selected_service: Option<String>,
+    pub startup: ui::startup::State,
 }
 
 const INTERVAL_KEY: &str = "interval_ms";
@@ -333,9 +365,10 @@ const ON_TOP_KEY: &str = "always_on_top";
 const PROBE_HTTP_KEY: &str = "probe_http";
 const HIDDEN_COLUMNS_KEY: &str = "hidden_columns";
 const HISTORY_WINDOW_KEY: &str = "history_window";
+const SUSPENDED_KEY: &str = "suspended";
 
 /// Tabelas com largura de coluna salva (ver `ui::columns`).
-pub const TABLES: [&str; 2] = ["processes", "ports"];
+pub const TABLES: [&str; 4] = ["processes", "ports", "services", "startup"];
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, start_minimized: bool) -> Self {
@@ -429,6 +462,12 @@ impl App {
             quitting: false,
             alert_config,
             last_alert: Arc::default(),
+            suspended: stored(SUSPENDED_KEY).map(|v| parse_keys(&v)).unwrap_or_default(),
+            tuning: None,
+            services: None,
+            service_search: String::new(),
+            selected_service: None,
+            startup: ui::startup::State::new(cc.egui_ctx.clone()),
         };
         app.install_alerts();
         app
@@ -489,6 +528,7 @@ impl App {
                     self.scroll_to_port = true;
                 }
             }
+            Some(alerts::Target::Disk) => self.view = View::Disk,
             None => {}
         }
     }
@@ -869,19 +909,40 @@ impl App {
         let Some(snap) = self.snap.clone() else { return };
         let Some(proc) = snap.find(key) else { return };
         let label = Self::server_label(proc);
-        let others = snap.listeners.iter().filter(|l| l.pid == key.pid && l.port != port).count();
+        // Num servidor de desenvolvimento vai a árvore desde a raiz (`npm run dev` →
+        // `cmd` → `node vite`): finalizar só quem escuta deixava o npm vivo, e há
+        // ferramentas que sobem o servidor de novo.
+        let root = match ports::classify(proc) {
+            Some(_) => ports::server_root(proc, |c| snap.parent_of(c)),
+            None => proc,
+        };
+        let (root_key, root_name) = (root.key(), root.name.clone());
+        let targets: Vec<KillTarget> = if root_key != key && !self.is_protected(root_key, &root_name) {
+            snap.tree_postorder(root_key).into_iter().map(KillTarget::of).collect()
+        } else {
+            vec![KillTarget::of(proc)]
+        };
+        let tree: HashSet<u32> = targets.iter().map(|t| t.key.pid).collect();
+        let others = snap.listeners.iter().filter(|l| tree.contains(&l.pid) && l.port != port).count();
         let also = match others {
             0 => String::new(),
             1 => " Ele também escuta em outra porta, que fecha junto.".to_owned(),
             n => format!(" Ele também escuta em outras {n} portas, que fecham junto."),
         };
+        let who = match targets.len() {
+            1 => format!("{label} ({}, PID {}) será encerrado.", proc.name, key.pid),
+            n => format!(
+                "{label} será encerrado com a árvore inteira: {} (PID {}) e mais {} processo{}.",
+                root_name,
+                root_key.pid,
+                n - 1,
+                if n == 2 { "" } else { "s" }
+            ),
+        };
         self.confirm = Some(KillRequest {
             title: format!("Liberar a porta {port}?"),
-            detail: format!(
-                "{label} ({}, PID {}) será encerrado.{also} Dados não salvos serão perdidos.",
-                proc.name, key.pid
-            ),
-            targets: vec![KillTarget::of(proc)],
+            detail: format!("{who}{also} Dados não salvos serão perdidos."),
+            targets,
             then: None,
         });
     }
@@ -897,6 +958,80 @@ impl App {
             targets,
             then: None,
         });
+    }
+
+    /// Suspende ou retoma. Suspenso, o processo não roda nada até ser retomado.
+    pub fn toggle_suspend(&mut self, key: ProcKey) {
+        let Some(proc) = self.snap.as_ref().and_then(|s| s.find(key)).cloned() else { return };
+        let label = proc.display_name().to_owned();
+        if self.suspended.contains(&key) {
+            match control::resume(key, &proc.name) {
+                Ok(()) | Err(KillError::NotFound) => {
+                    self.suspended.remove(&key);
+                    self.toast(format!("{label} retomado"), ToastKind::Ok, false);
+                }
+                Err(e) => self.control_error(&format!("Não retomou {label}"), e),
+            }
+        } else {
+            match control::suspend(key, &proc.name) {
+                Ok(()) => {
+                    self.suspended.insert(key);
+                    self.toast(format!("{label} suspenso até você retomar"), ToastKind::Ok, false);
+                }
+                Err(e) => self.control_error(&format!("Não suspendeu {label}"), e),
+            }
+        }
+    }
+
+    fn control_error(&mut self, what: &str, e: KillError) {
+        let denied = e == KillError::AccessDenied;
+        self.toast(format!("{what}: {}", e.describe()), ToastKind::Error, denied && !self.elevated);
+    }
+
+    /// Prioridade, núcleos e modo eficiência. Lidos uma vez por seleção (abre um handle)
+    /// e de novo depois de uma mudança.
+    pub fn tuning(&mut self, key: ProcKey) -> control::Tuning {
+        if self.tuning.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.tuning = Some((key, control::read(key)));
+        }
+        self.tuning.as_ref().map(|(_, t)| t.clone()).unwrap_or_default()
+    }
+
+    /// Aplica um ajuste e relê o estado do processo; erro vira aviso.
+    pub fn tune(&mut self, key: ProcKey, change: Tune) {
+        let Some(proc) = self.snap.as_ref().and_then(|s| s.find(key)).cloned() else { return };
+        let result = match change {
+            Tune::Priority(p) => control::set_priority(key, &proc.name, p),
+            Tune::Affinity(mask) => control::set_affinity(key, &proc.name, mask),
+            Tune::Efficiency(on) => control::set_efficiency(key, &proc.name, on),
+        };
+        if let Err(e) = result {
+            self.control_error(&format!("Não alterou {}", proc.display_name()), e);
+        }
+        self.tuning = None;
+    }
+
+    /// Grava o histórico do processo em CSV na pasta Downloads e mostra o arquivo.
+    pub fn export_history(&mut self, key: ProcKey) {
+        let Some(proc) = self.snap.as_ref().and_then(|s| s.find(key)).cloned() else { return };
+        let Some(history) = self.histories.get(&key) else { return };
+        let csv = export::history_csv(&history.cpu, &history.memory, self.interval_ms, chrono::Local::now());
+        let stem = proc.name.strip_suffix(".exe").unwrap_or(&proc.name);
+        match export::save(stem, key.pid, &csv) {
+            Ok(path) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.toast(format!("Histórico salvo em Downloads: {name}"), ToastKind::Ok, false);
+                platform::open_in_explorer(&path);
+            }
+            Err(e) => self.toast(format!("Não exportou o histórico: {e}"), ToastKind::Error, false),
+        }
+    }
+
+    /// Ação num serviço; o resultado chega depois, como aviso.
+    pub fn service_action(&mut self, ctx: &egui::Context, name: &str, display: &str, action: services::Action) {
+        if let Some(manager) = &self.services {
+            manager.act(ctx, name.to_owned(), display.to_owned(), action);
+        }
     }
 
     fn execute_kill(&mut self, request: KillRequest) {
@@ -966,10 +1101,31 @@ impl App {
     fn record_histories(&mut self, snap: &Snapshot) {
         let alive: HashSet<ProcKey> = snap.processes.iter().map(|p| p.key()).collect();
         self.histories.retain(|k, _| alive.contains(k));
+        self.suspended.retain(|k| alive.contains(k));
         for p in &snap.processes {
             let h = self.histories.entry(p.key()).or_insert_with(ProcHistory::new);
             h.cpu.push(p.cpu);
             h.memory.push(p.memory as f32);
+        }
+    }
+
+    /// A thread dos serviços nasce na primeira visita à tela e só relê com ela aberta.
+    fn services_logic(&mut self, ctx: &egui::Context) {
+        let visible = self.view == View::Services;
+        if visible && self.services.is_none() {
+            self.services = Some(services::Manager::spawn(ctx.clone()));
+        }
+        let Some(manager) = &mut self.services else { return };
+        manager.set_active(visible);
+        for (display, action, result) in manager.take_outcomes() {
+            match result {
+                Ok(()) => self.toast(format!("{display} {}", action.done()), ToastKind::Ok, false),
+                Err(e) => {
+                    let denied = e == services::Error::AccessDenied;
+                    let text = format!("Não deu para {} {display}: {}", action.verb(), e.describe());
+                    self.toast(text, ToastKind::Error, denied && !self.elevated);
+                }
+            }
         }
     }
 
@@ -1136,6 +1292,11 @@ impl eframe::App for App {
                 Err(e) => self.toast(format!("Não reabriu o servidor: {e}"), ToastKind::Error, false),
             }
         }
+        self.services_logic(ctx);
+        if self.view == View::Startup {
+            self.startup.ensure_loaded();
+        }
+        self.startup.poll();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1166,6 +1327,8 @@ impl eframe::App for App {
                 None => loading(ui),
                 Some(snap) => match self.view {
                     View::Processes => ui::processes::show(self, ui, &snap),
+                    View::Services => ui::services::show(self, ui, &snap),
+                    View::Startup => ui::startup::show(self, ui, &snap),
                     View::Ports => ui::ports::show(self, ui, &snap),
                     other => ui::performance::show(self, ui, &snap, other),
                 },
@@ -1208,6 +1371,7 @@ impl eframe::App for App {
         storage.set_string(PROBE_HTTP_KEY, if self.probe_http { "1" } else { "0" }.to_owned());
         storage.set_string(HIDDEN_COLUMNS_KEY, self.hidden_columns.iter().cloned().collect::<Vec<_>>().join(","));
         storage.set_string(HISTORY_WINDOW_KEY, self.history_window.minutes().to_string());
+        storage.set_string(SUSPENDED_KEY, keys_text(&self.suspended));
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -1261,6 +1425,8 @@ const ALERT_CPU_PERCENT_KEY: &str = "alert_cpu_percent";
 const ALERT_CPU_SECS_KEY: &str = "alert_cpu_secs";
 const ALERT_MEMORY_ON_KEY: &str = "alert_memory_on";
 const ALERT_MEMORY_KEY: &str = "alert_memory_bytes";
+const ALERT_DISK_ON_KEY: &str = "alert_disk_on";
+const ALERT_DISK_PERCENT_KEY: &str = "alert_disk_free_percent";
 
 /// Configuração dos alertas salva; o que faltar ou for inválido fica no padrão.
 fn load_alert_config(stored: &dyn Fn(&str) -> Option<String>) -> alerts::Config {
@@ -1277,6 +1443,11 @@ fn load_alert_config(stored: &dyn Fn(&str) -> Option<String>) -> alerts::Config 
         cpu_secs: stored(ALERT_CPU_SECS_KEY).and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(defaults.cpu_secs),
         memory_enabled: flag(ALERT_MEMORY_ON_KEY, defaults.memory_enabled),
         memory_bytes: stored(ALERT_MEMORY_KEY).and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(defaults.memory_bytes),
+        disk_enabled: flag(ALERT_DISK_ON_KEY, defaults.disk_enabled),
+        disk_free_percent: stored(ALERT_DISK_PERCENT_KEY)
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f32| (1.0..=50.0).contains(v))
+            .unwrap_or(defaults.disk_free_percent),
     }
 }
 
@@ -1289,6 +1460,8 @@ fn save_alert_config(storage: &mut dyn eframe::Storage, c: &alerts::Config) {
     storage.set_string(ALERT_CPU_SECS_KEY, c.cpu_secs.to_string());
     storage.set_string(ALERT_MEMORY_ON_KEY, flag(c.memory_enabled));
     storage.set_string(ALERT_MEMORY_KEY, c.memory_bytes.to_string());
+    storage.set_string(ALERT_DISK_ON_KEY, flag(c.disk_enabled));
+    storage.set_string(ALERT_DISK_PERCENT_KEY, c.disk_free_percent.to_string());
 }
 
 /// Lê a entrada de inicialização. Se ela aponta para outro executável (o app foi
@@ -1300,6 +1473,22 @@ fn read_autostart() -> (bool, bool) {
         let _ = platform::set_autostart(true, minimized);
     }
     (true, minimized)
+}
+
+/// Processos como se guardam: "1234:1760000000,5678:1760000100" (PID e hora de criação).
+fn keys_text(keys: &HashSet<ProcKey>) -> String {
+    let mut list: Vec<String> = keys.iter().map(|k| format!("{}:{}", k.pid, k.start)).collect();
+    list.sort();
+    list.join(",")
+}
+
+fn parse_keys(text: &str) -> HashSet<ProcKey> {
+    text.split(',')
+        .filter_map(|item| {
+            let (pid, start) = item.trim().split_once(':')?;
+            Some(ProcKey { pid: pid.parse().ok()?, start: start.parse().ok()? })
+        })
+        .collect()
 }
 
 fn window_level(on_top: bool) -> egui::WindowLevel {
@@ -1324,7 +1513,7 @@ mod tests {
 
     #[test]
     fn preferencias_salvas_voltam_iguais() {
-        for view in [View::Processes, View::Ports, View::Cpu, View::Memory, View::Disk, View::Network, View::Gpu(1)] {
+        for view in [View::Processes, View::Services, View::Startup, View::Ports, View::Cpu, View::Memory, View::Disk, View::Network, View::Gpu(1)] {
             assert_eq!(View::from_key(&view.key()), Some(view));
         }
         assert_eq!(View::from_key("gpu:x"), None);
@@ -1335,5 +1524,10 @@ mod tests {
         for key in PortSort::ALL {
             assert_eq!(PortSort::ALL.into_iter().find(|k| k.key() == key.key()), Some(key));
         }
+        let suspended: HashSet<ProcKey> =
+            [ProcKey { pid: 12, start: 1_760_000_000 }, ProcKey { pid: 7, start: 1_760_000_100 }].into();
+        assert_eq!(parse_keys(&keys_text(&suspended)), suspended);
+        assert_eq!(parse_keys("x, 1:a, 5:9"), [ProcKey { pid: 5, start: 9 }].into());
+        assert!(parse_keys("").is_empty());
     }
 }

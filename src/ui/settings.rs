@@ -427,6 +427,23 @@ fn alerts_section(app: &mut App, ui: &mut Ui) {
     });
 
     ui.add_space(16.0);
+    heading(ui, "Disco");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        row(ui, "Disco quase cheio", "Uma unidade com pouco espaço livre. Avisa uma vez até liberar espaço.", 40.0, |ui| {
+            widgets::toggle(ui, &mut config.disk_enabled);
+        });
+        ui.add_enabled_ui(config.disk_enabled, |ui| {
+            row(ui, "Limite", "Espaço livre abaixo disso.", 230.0, |ui| {
+                let options: Vec<(u32, String)> = [5, 10, 15, 20].iter().map(|p| (*p, format!("{p}%"))).collect();
+                if let Some(p) = segmented(ui, config.disk_free_percent.round() as u32, &options) {
+                    config.disk_free_percent = p as f32;
+                }
+            });
+        });
+    });
+
+    ui.add_space(16.0);
     ui.horizontal(|ui| {
         if widgets::ghost_button(ui, &format!("{}  Testar aviso", icon::BELL_SIMPLE_RINGING)).clicked() {
             app.tray.notifier().notify("Teste de alerta", "Os avisos do Process Monitor aparecem assim.");

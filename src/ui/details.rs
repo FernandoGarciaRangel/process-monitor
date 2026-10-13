@@ -3,7 +3,8 @@
 use egui::{Align, CornerRadius, Frame, Layout, Margin, RichText, Stroke, Ui, vec2};
 use egui_phosphor::regular as icon;
 
-use crate::app::{self, App, HistorySpan, View};
+use crate::app::{self, App, HistorySpan, Tune, View};
+use crate::control::{self, Priority};
 use crate::format;
 use crate::ports::{Connection, Listener, Reply, TcpState};
 use crate::sampler::{ProcKey, Series, Snapshot};
@@ -58,12 +59,38 @@ fn body(app: &mut App, ui: &mut Ui) {
                 if tree.on_hover_text("Finalizar o processo e todos os que ele abriu").clicked() {
                     app.request_kill(key, true);
                 }
+                let suspended = app.suspended.contains(&key);
+                let blocked = control::suspend_blocked(key.pid, &p.name);
+                let glyph = if suspended { icon::PLAY } else { icon::PAUSE };
+                let pause = ui.add_enabled(
+                    suspended || blocked.is_none(),
+                    egui::Button::new(RichText::new(glyph).font(theme::regular(15.0)).color(INK_2))
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(Stroke::new(1.0, theme::HAIRLINE_STRONG))
+                        .corner_radius(CornerRadius::same(R_SM))
+                        .min_size(vec2(32.0, 32.0)),
+                );
+                let pause = match blocked {
+                    Some(reason) if !suspended => pause.on_disabled_hover_text(reason),
+                    _ if suspended => pause.on_hover_text("Retomar o processo"),
+                    _ => pause.on_hover_text("Suspender: congela o processo sem finalizar"),
+                };
+                if pause.clicked() {
+                    app.toggle_suspend(key);
+                }
             });
         });
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         Frame::NONE.inner_margin(Margin { left: 20, right: 18, top: 18, bottom: 12 }).show(ui, |ui| {
             header(app, ui, p.display_name(), &p.name, p.pid, p.exe.as_deref(), p.user.as_deref());
+            if app.suspended.contains(&key) {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    crate::ui::processes::suspended_pill(ui);
+                    ui.label(RichText::new("Não roda nada até ser retomado.").font(theme::regular(12.0)).color(INK_3));
+                });
+            }
             ui.add_space(16.0);
             live_charts(app, ui, key, p.cpu, p.memory);
             ui.add_space(18.0);
@@ -136,6 +163,9 @@ fn body(app: &mut App, ui: &mut Ui) {
                 }
             });
 
+            ui.add_space(18.0);
+            tuning_section(app, ui, key, protected);
+
             let children = snap.children_of(p);
             if !children.is_empty() {
                 ui.add_space(18.0);
@@ -201,6 +231,10 @@ fn live_charts(app: &mut App, ui: &mut Ui, key: ProcKey, cpu: f32, memory: u64) 
         widgets::section_label(ui, "Histórico");
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            if widgets::icon_button(ui, icon::DOWNLOAD_SIMPLE, "Exportar o histórico (até 10 min) em CSV para Downloads").clicked() {
+                app.export_history(key);
+            }
+            ui.add_space(4.0);
             for span in [HistorySpan::TenMinutes, HistorySpan::Minute] {
                 let on = app.history_span == span;
                 let button = egui::Button::selectable(
@@ -263,6 +297,97 @@ fn live_charts(app: &mut App, ui: &mut Ui, key: ProcKey, cpu: f32, memory: u64) 
         let text = memory_trend(delta, secs);
         ui.add_space(6.0);
         ui.label(RichText::new(text).font(theme::regular(12.0)).color(INK_3));
+    }
+}
+
+/// Prioridade, núcleos e modo eficiência. Sem acesso ao processo, só o traço.
+fn tuning_section(app: &mut App, ui: &mut Ui, key: ProcKey, protected: bool) {
+    widgets::section_label(ui, "Ajustes");
+    ui.add_space(6.0);
+    let tuning = app.tuning(key);
+    let mut change: Option<Tune> = None;
+    let none = || RichText::new("— (sem acesso)").font(theme::regular(12.5)).color(INK_2);
+    ui.add_enabled_ui(!protected, |ui| {
+        egui::Grid::new("tuning").num_columns(2).spacing(vec2(16.0, 8.0)).min_col_width(110.0).show(ui, |ui| {
+            ui.label(RichText::new("Prioridade").font(theme::regular(12.0)).color(INK_3));
+            match tuning.priority {
+                Some(current) => {
+                    egui::ComboBox::from_id_salt("priority")
+                        .selected_text(RichText::new(current.label()).font(theme::regular(12.5)))
+                        .width(170.0)
+                        .show_ui(ui, |ui| {
+                            for p in Priority::ALL {
+                                if ui.selectable_label(p == current, p.label()).clicked() && p != current {
+                                    change = Some(Tune::Priority(p));
+                                }
+                            }
+                        });
+                }
+                None => {
+                    ui.label(none());
+                }
+            }
+            ui.end_row();
+
+            ui.label(RichText::new("Núcleos").font(theme::regular(12.0)).color(INK_3));
+            match tuning.affinity {
+                Some((mask, system)) => {
+                    ui.horizontal(|ui| {
+                        let text = format!("{} de {}", control::core_count(mask), control::core_count(system));
+                        ui.label(RichText::new(text).font(theme::regular(12.5)).color(INK));
+                        let button = widgets::icon_button(ui, icon::SLIDERS_HORIZONTAL, "Escolher os núcleos que o processo usa");
+                        egui::Popup::from_toggle_button_response(&button)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
+                                ui.set_max_width(260.0);
+                                ui.label(RichText::new("Núcleos lógicos").font(theme::semibold(13.0)).color(INK));
+                                ui.add_space(4.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+                                    for bit in (0..64).filter(|b| system & (1u64 << b) != 0) {
+                                        let mut on = mask & (1u64 << bit) != 0;
+                                        if ui.checkbox(&mut on, bit.to_string()).changed() {
+                                            let next = if on { mask | (1u64 << bit) } else { mask & !(1u64 << bit) };
+                                            // Ao menos um núcleo: sem nenhum o Windows recusa.
+                                            if next != 0 {
+                                                change = Some(Tune::Affinity(next));
+                                            }
+                                        }
+                                    }
+                                });
+                                ui.add_space(6.0);
+                                if mask != system && widgets::ghost_button(ui, "Todos").clicked() {
+                                    change = Some(Tune::Affinity(system));
+                                }
+                            });
+                    });
+                }
+                None => {
+                    ui.label(none());
+                }
+            }
+            ui.end_row();
+
+            ui.label(RichText::new("Modo eficiência").font(theme::regular(12.0)).color(INK_3));
+            match tuning.efficiency {
+                Some(current) => {
+                    let mut on = current;
+                    let response = widgets::toggle(ui, &mut on).on_hover_text(
+                        "Como o do Gerenciador de Tarefas: o Windows roda o processo mais devagar e com prioridade baixa, para economizar energia.",
+                    );
+                    if response.changed() {
+                        change = Some(Tune::Efficiency(on));
+                    }
+                }
+                None => {
+                    ui.label(none());
+                }
+            }
+            ui.end_row();
+        });
+    });
+    if let Some(change) = change {
+        app.tune(key, change);
     }
 }
 
