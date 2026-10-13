@@ -12,6 +12,7 @@ mod icons;
 mod locks;
 mod platform;
 mod ports;
+mod rules;
 mod sampler;
 mod services;
 mod startup;

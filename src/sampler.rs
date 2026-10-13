@@ -314,6 +314,7 @@ enum Command {
     SetHistoryWindow(Duration),
     SetAlerts(alerts::Config),
     SetAlertSink(AlertSink),
+    SetRules(Vec<crate::rules::Rule>),
 }
 
 pub struct Sampler {
@@ -360,6 +361,11 @@ impl Sampler {
     pub fn set_alert_sink(&self, sink: AlertSink) {
         let _ = self.tx.send(Command::SetAlertSink(sink));
     }
+
+    /// Regras por programa: aplicadas nesta thread a cada processo novo.
+    pub fn set_rules(&self, rules: Vec<crate::rules::Rule>) {
+        let _ = self.tx.send(Command::SetRules(rules));
+    }
 }
 
 fn process_refresh_kind() -> ProcessRefreshKind {
@@ -396,6 +402,7 @@ fn run(
     let mut alerts = Alerts::default();
     let mut alert_config = alerts::Config::default();
     let mut alert_sink: Option<AlertSink> = None;
+    let mut rules = crate::rules::Applier::default();
     // Buffer da leitura de threads, reaproveitado: tem centenas de KB.
     let mut threads_buf: Vec<u8> = Vec::new();
     let own_pid = std::process::id();
@@ -570,6 +577,10 @@ fn run(
             history_window: window,
         };
 
+        // Só os processos que ainda não receberam a regra: depois da primeira coleta,
+        // quase sempre nenhum.
+        rules.apply(&snapshot.processes, own_pid);
+
         if let Some(sink) = &alert_sink {
             let fired = alerts.evaluate(
                 Instant::now(),
@@ -608,6 +619,7 @@ fn run(
                         Command::SetHistoryWindow(w) => window = w,
                         Command::SetAlerts(c) => alert_config = c,
                         Command::SetAlertSink(s) => alert_sink = Some(s),
+                        Command::SetRules(r) => rules.set_rules(r),
                         Command::Refresh => {}
                     }
                     // Mesma janela de tempo com outro intervalo = outro número de pontos.

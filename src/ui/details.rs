@@ -174,7 +174,7 @@ fn body(app: &mut App, ui: &mut Ui) {
             });
 
             ui.add_space(18.0);
-            tuning_section(app, ui, key, protected);
+            tuning_section(app, ui, key, &p.name, protected);
 
             let children = snap.children_of(p);
             if !children.is_empty() {
@@ -311,7 +311,7 @@ fn live_charts(app: &mut App, ui: &mut Ui, key: ProcKey, cpu: f32, memory: u64) 
 }
 
 /// Prioridade, núcleos e modo eficiência. Sem acesso ao processo, só o traço.
-fn tuning_section(app: &mut App, ui: &mut Ui, key: ProcKey, protected: bool) {
+fn tuning_section(app: &mut App, ui: &mut Ui, key: ProcKey, exe: &str, protected: bool) {
     widgets::section_label(ui, "Ajustes");
     ui.add_space(6.0);
     let tuning = app.tuning(key);
@@ -399,6 +399,46 @@ fn tuning_section(app: &mut App, ui: &mut Ui, key: ProcKey, protected: bool) {
     if let Some(change) = change {
         app.tune(key, change);
     }
+
+    // Regra do programa: os ajustes valem toda vez que ele abrir.
+    if protected {
+        return;
+    }
+    ui.add_space(8.0);
+    let rule = app.rule_for(exe).cloned();
+    let differs = tuning.priority.is_some_and(|p| p != Priority::Normal)
+        || tuning.affinity.is_some_and(|(mask, system)| mask != system)
+        || tuning.efficiency == Some(true);
+    ui.horizontal(|ui| {
+        match &rule {
+            Some(r) => {
+                ui.label(RichText::new(icon::PUSH_PIN).font(theme::regular(13.0)).color(ACCENT));
+                ui.add(
+                    egui::Label::new(RichText::new(format!("Sempre ao abrir: {}", r.summary())).font(theme::regular(12.0)).color(INK_2))
+                        .truncate(),
+                )
+                .on_hover_text(format!("Regra de {exe}: aplicada pelo Process Monitor toda vez que o programa abrir."));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::icon_button(ui, icon::X, "Esquecer a regra").clicked() {
+                        app.forget_rule(exe);
+                    }
+                    if differs && widgets::icon_button(ui, icon::ARROW_CLOCKWISE, "Trocar pela configuração atual").clicked() {
+                        app.remember_tuning(key);
+                    }
+                });
+            }
+            None => {
+                let text = RichText::new(format!("{}  Lembrar para sempre que abrir", icon::PUSH_PIN)).font(theme::regular(12.5));
+                let button = ui
+                    .add_enabled(differs, egui::Button::new(text.color(if differs { ACCENT } else { INK_3 })).frame(false))
+                    .on_hover_text(format!("Aplica estes ajustes toda vez que {exe} abrir, também com a janela na bandeja."))
+                    .on_disabled_hover_text("Mude a prioridade, os núcleos ou o modo eficiência primeiro.");
+                if button.clicked() {
+                    app.remember_tuning(key);
+                }
+            }
+        }
+    });
 }
 
 /// "Memória +120 MB em 10 min", "Memória estável em 45 s".

@@ -349,6 +349,43 @@ fn processes(app: &mut App, ui: &mut Ui) {
         divider(ui);
         reset_widths_row(ui, TABLES[0]);
     });
+
+    ui.add_space(16.0);
+    heading(ui, "Regras por programa");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        if app.rules.is_empty() {
+            ui.label(
+                RichText::new(
+                    "Nenhuma regra. Ajuste a prioridade, os núcleos ou o modo eficiência de um processo e use \"Lembrar para sempre que abrir\" no painel de detalhes.",
+                )
+                .font(theme::regular(12.0))
+                .color(INK_3),
+            );
+            return;
+        }
+        ui.label(
+            RichText::new("Aplicadas toda vez que o programa abre, também com a janela na bandeja.")
+                .font(theme::regular(12.0))
+                .color(INK_3),
+        );
+        ui.add_space(6.0);
+        let mut forget: Option<String> = None;
+        for rule in &app.rules {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&rule.exe).font(theme::semibold(13.0)).color(INK));
+                ui.label(RichText::new(rule.summary()).font(theme::regular(12.5)).color(INK_2));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::icon_button(ui, icon::X, "Esquecer a regra").clicked() {
+                        forget = Some(rule.exe.clone());
+                    }
+                });
+            });
+        }
+        if let Some(exe) = forget {
+            app.forget_rule(&exe);
+        }
+    });
 }
 
 /// Avisos na bandeja. Valem com a janela escondida: quem avalia é a thread da coleta.

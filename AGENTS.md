@@ -217,6 +217,10 @@ criação; case com a coleta pelos dois (±2 s), nunca só pelo PID.
   inteiro, então nessas linhas a ação é `docker stop`, e finalizar fica bloqueado. O
   `docker ps` e o `wsl -l --running` só rodam com a tela de portas aberta e alguma porta
   desses processos, a cada 10 s (60 s se o Docker estiver parado).
+- Regras por programa (`src/rules.rs`): prioridade, núcleos e modo eficiência gravados
+  pelo "Lembrar" do painel de detalhes. Quem aplica é a thread da coleta, uma vez por
+  processo novo (também com a janela na bandeja). O modo eficiência vai antes da
+  prioridade, porque ele mesmo baixa a prioridade.
 - Servidores sem terminal (`ports::orphan_servers`): de desenvolvimento, com o pai morto
   e alguma porta em escuta na árvore. Sem a exigência da porta, qualquer script Python ou
   Node solto que ficou sem pai entrava no aviso.

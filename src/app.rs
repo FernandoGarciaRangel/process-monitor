@@ -8,7 +8,7 @@ use egui::{Align2, Color32, CornerRadius, Frame, Id, Margin, RichText, Stroke, v
 use egui_phosphor::regular as icon;
 
 use crate::icons::IconCache;
-use crate::{containers, control, export, services};
+use crate::{containers, control, export, rules, services};
 use crate::platform::{self, KillError};
 use crate::ports::{self, Kind, PortRange, Prober, Statuses, Target};
 use crate::sampler::{ProcInfo, ProcKey, Sampler, Series, Snapshot};
@@ -343,6 +343,8 @@ pub struct App {
     pub service_search: String,
     /// Servidores sem terminal que o usuário já viu e mandou esquecer (nesta execução).
     pub orphans_dismissed: HashSet<ProcKey>,
+    /// Regras por programa, aplicadas pela thread da coleta.
+    pub rules: Vec<rules::Rule>,
     pub selected_service: Option<String>,
     pub startup: ui::startup::State,
     /// Containers do Docker e distros do WSL por trás das portas, lidos com a tela aberta.
@@ -367,6 +369,7 @@ const ON_TOP_KEY: &str = "always_on_top";
 const PROBE_HTTP_KEY: &str = "probe_http";
 const HIDDEN_COLUMNS_KEY: &str = "hidden_columns";
 const HISTORY_WINDOW_KEY: &str = "history_window";
+const RULES_KEY: &str = "rules";
 
 /// Tabelas com largura de coluna salva (ver `ui::columns`).
 pub const TABLES: [&str; 4] = ["processes", "ports", "services", "startup"];
@@ -467,12 +470,14 @@ impl App {
             services: None,
             service_search: String::new(),
             orphans_dismissed: HashSet::new(),
+            rules: stored(RULES_KEY).map(|v| rules::parse(&v)).unwrap_or_default(),
             selected_service: None,
             startup: ui::startup::State::new(cc.egui_ctx.clone()),
             containers: containers::Watcher::new(cc.egui_ctx.clone()),
             container_info: Arc::default(),
         };
         app.install_alerts();
+        app.sampler.set_rules(app.rules.clone());
         app
     }
 
@@ -630,6 +635,7 @@ impl App {
         self.set_history_window(HistoryWindow::One);
         self.set_autostart(false, false);
         self.set_alert_config(alerts::Config::default());
+        self.set_rules(Vec::new());
         for table in TABLES {
             ui::columns::reset_widths(ctx, table);
         }
@@ -1070,6 +1076,45 @@ impl App {
         self.tuning = None;
     }
 
+    pub fn set_rules(&mut self, rules: Vec<rules::Rule>) {
+        self.rules = rules;
+        self.sampler.set_rules(self.rules.clone());
+    }
+
+    pub fn rule_for(&self, exe: &str) -> Option<&rules::Rule> {
+        self.rules.iter().find(|r| r.exe.eq_ignore_ascii_case(exe))
+    }
+
+    /// Guarda os ajustes atuais do processo como regra do programa: valem para as
+    /// próximas vezes que ele abrir (e para as outras cópias que já estão rodando).
+    pub fn remember_tuning(&mut self, key: ProcKey) {
+        let Some(proc) = self.snap.as_ref().and_then(|s| s.find(key)).cloned() else { return };
+        let tuning = self.tuning(key);
+        let efficiency = tuning.efficiency == Some(true);
+        let rule = rules::Rule {
+            exe: proc.name.to_lowercase(),
+            // No modo eficiência a prioridade baixa já vem dele.
+            priority: tuning.priority.filter(|p| *p != control::Priority::Normal && !(efficiency && *p == control::Priority::Idle)),
+            affinity: tuning.affinity.and_then(|(mask, system)| (mask != system).then_some(mask)),
+            efficiency,
+        };
+        if rule.is_empty() {
+            return;
+        }
+        let mut list = self.rules.clone();
+        list.retain(|r| !r.exe.eq_ignore_ascii_case(&rule.exe));
+        list.push(rule);
+        list.sort_by(|a, b| a.exe.cmp(&b.exe));
+        self.set_rules(list);
+        self.toast(format!("{} vai abrir sempre com esses ajustes", proc.display_name()), ToastKind::Ok, false);
+    }
+
+    pub fn forget_rule(&mut self, exe: &str) {
+        let mut list = self.rules.clone();
+        list.retain(|r| !r.exe.eq_ignore_ascii_case(exe));
+        self.set_rules(list);
+    }
+
     /// Grava o histórico do processo em CSV na pasta Downloads e mostra o arquivo.
     pub fn export_history(&mut self, key: ProcKey) {
         let Some(proc) = self.snap.as_ref().and_then(|s| s.find(key)).cloned() else { return };
@@ -1447,6 +1492,7 @@ impl eframe::App for App {
         storage.set_string(PROBE_HTTP_KEY, if self.probe_http { "1" } else { "0" }.to_owned());
         storage.set_string(HIDDEN_COLUMNS_KEY, self.hidden_columns.iter().cloned().collect::<Vec<_>>().join(","));
         storage.set_string(HISTORY_WINDOW_KEY, self.history_window.minutes().to_string());
+        storage.set_string(RULES_KEY, rules::to_text(&self.rules));
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
