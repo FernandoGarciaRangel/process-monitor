@@ -305,6 +305,8 @@ pub struct App {
     pub history_window: HistoryWindow,
     /// Entrada de inicialização do Windows: (ligada, abre minimizado). Lida do registro.
     pub autostart: (bool, bool),
+    /// Registrado no lugar do Gerenciador de Tarefas (chave IFEO). Lido do registro.
+    pub replaces_taskmgr: bool,
     /// Aberto pela inicialização do Windows com `--minimized`: some depois do 1º quadro.
     start_minimized: bool,
     /// Fechar de verdade (Sair, instalador, atualização, reinício como administrador).
@@ -422,6 +424,7 @@ impl App {
             hidden_columns,
             history_window,
             autostart: read_autostart(),
+            replaces_taskmgr: platform::replaces_task_manager(),
             start_minimized,
             quitting: false,
             alert_config,
@@ -511,6 +514,23 @@ impl App {
             self.toast(format!("Não alterou a inicialização com o Windows: {e}"), ToastKind::Error, false);
         }
         self.autostart = read_autostart();
+    }
+
+    /// Pede administrador e grava a chave IFEO; o estado mostrado é sempre o que ficou
+    /// no registro, mesmo se o usuário cancelar o UAC.
+    pub fn set_replace_task_manager(&mut self, on: bool) {
+        match platform::request_replace_task_manager(on) {
+            Ok(()) => {
+                let msg = if on {
+                    "O Process Monitor abre no lugar do Gerenciador de Tarefas"
+                } else {
+                    "Gerenciador de Tarefas padrão restaurado"
+                };
+                self.toast(msg.to_owned(), ToastKind::Ok, false);
+            }
+            Err(e) => self.toast(format!("Não alterou o Gerenciador de Tarefas: {e}"), ToastKind::Error, false),
+        }
+        self.replaces_taskmgr = platform::replaces_task_manager();
     }
 
     pub fn column_visible(&self, table: &str, column: &str) -> bool {

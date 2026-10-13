@@ -19,17 +19,20 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::Registry::{
-    HKEY_CURRENT_USER, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
+    HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ, RRF_RT_REG_SZ, RegDeleteKeyValueW, RegGetValueW, RegSetKeyValueW,
 };
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, GetProcessTimes, IsProcessCritical, OpenProcess, OpenProcessToken,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
 };
-use windows::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW, ShellExecuteW};
+use windows::Win32::UI::Shell::{
+    SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW,
+    ShellExecuteExW, ShellExecuteW,
+};
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DestroyIcon, GetIconInfo, HICON, ICONINFO, SPI_GETWORKAREA, SW_SHOWNORMAL, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SystemParametersInfoW,
+    DestroyIcon, GetIconInfo, HICON, ICONINFO, SPI_GETWORKAREA, SW_HIDE, SW_SHOWNORMAL,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR, w};
 
@@ -238,6 +241,106 @@ pub fn set_autostart(enabled: bool, minimized: bool) -> Result<(), String> {
         )
         .ok()
         .map_err(|e| e.message())
+    }
+}
+
+/// Chave IFEO que faz o Windows abrir outro programa no lugar do Gerenciador de
+/// Tarefas: o valor `Debugger` recebe o caminho deste exe, e aí o Ctrl+Shift+Esc, o
+/// menu da barra de tarefas e o Ctrl+Alt+Del abrem o Process Monitor. Fica em HKLM,
+/// então mexer nela pede administrador; o desinstalador tem que apagá-la (sem isso,
+/// o Gerenciador de Tarefas para de abrir quando o exe some).
+const TASKMGR_IFEO_KEY: PCWSTR = w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\taskmgr.exe");
+const DEBUGGER_VALUE: PCWSTR = w!("Debugger");
+
+/// Este exe está registrado no lugar do Gerenciador de Tarefas? Lê HKLM; a leitura
+/// não precisa de administrador.
+pub fn replaces_task_manager() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    unsafe {
+        let mut len = 0u32;
+        if RegGetValueW(HKEY_LOCAL_MACHINE, TASKMGR_IFEO_KEY, DEBUGGER_VALUE, RRF_RT_REG_SZ, None, None, Some(&mut len))
+            .is_err()
+        {
+            return false;
+        }
+        let mut buf = vec![0u16; len as usize / 2];
+        if RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            TASKMGR_IFEO_KEY,
+            DEBUGGER_VALUE,
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let value = String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]);
+        let quoted = format!("\"{}\"", exe.display());
+        value.trim().eq_ignore_ascii_case(&quoted)
+    }
+}
+
+/// Grava ou apaga a chave direto no HKLM. Só funciona com o processo já elevado — é o
+/// que a instância aberta com `--set-taskmgr` faz. Apagar quando não existe não é erro.
+pub fn write_task_manager_replacement(enabled: bool) -> Result<(), String> {
+    unsafe {
+        if !enabled {
+            let result = RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, TASKMGR_IFEO_KEY, DEBUGGER_VALUE);
+            return if result.is_ok() || result == ERROR_FILE_NOT_FOUND { Ok(()) } else { Err(result.to_hresult().message()) };
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let command = format!("\"{}\"", exe.display());
+        let wide: Vec<u16> = command.encode_utf16().chain([0]).collect();
+        RegSetKeyValueW(
+            HKEY_LOCAL_MACHINE,
+            TASKMGR_IFEO_KEY,
+            DEBUGGER_VALUE,
+            REG_SZ.0,
+            Some(wide.as_ptr().cast()),
+            (wide.len() * 2) as u32,
+        )
+        .ok()
+        .map_err(|e| e.message())
+    }
+}
+
+/// Liga ou desliga a substituição, pedindo administrador (UAC) quando preciso. Já
+/// elevado, grava direto; senão abre uma instância elevada só para isso
+/// (`--set-taskmgr`) e espera ela terminar. No build de debug não grava: o caminho
+/// apontaria para `target\` e atropelaria o registro da versão instalada.
+pub fn request_replace_task_manager(enabled: bool) -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        return Err("indisponível no build de debug".to_owned());
+    }
+    if is_elevated() {
+        return write_task_manager_replacement(enabled);
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = HSTRING::from(exe.as_os_str());
+    let params = HSTRING::from(format!("--set-taskmgr={}", if enabled { 1 } else { 0 }));
+    unsafe {
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS,
+            lpVerb: w!("runas"),
+            lpFile: PCWSTR(exe.as_ptr()),
+            lpParameters: PCWSTR(params.as_ptr()),
+            nShow: SW_HIDE.0,
+            ..Default::default()
+        };
+        ShellExecuteExW(&mut info).map_err(|_| "elevação cancelada".to_owned())?;
+        if info.hProcess.is_invalid() {
+            return Err("elevação cancelada".to_owned());
+        }
+        let guard = HandleGuard(info.hProcess);
+        // 15 s cobrem o UAC e a gravação; passando disso, a UI relê o estado real.
+        WaitForSingleObject(guard.0, 15_000);
+        let mut code = 0u32;
+        let _ = GetExitCodeProcess(guard.0, &mut code);
+        if code == 0 { Ok(()) } else { Err("não foi possível gravar no registro".to_owned()) }
     }
 }
 

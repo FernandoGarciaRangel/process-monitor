@@ -41,6 +41,8 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 [Tasks]
 ; Marcada por padrao: o atalho na area de trabalho faz parte do pedido.
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+; Desmarcada: a substituicao mexe em HKLM e pede administrador (UAC) a parte.
+Name: "replacetaskmgr"; Description: "Substituir o Gerenciador de Tarefas pelo Process Monitor"; GroupDescription: "Sistema:"; Flags: unchecked
 
 [Files]
 Source: "..\target\release\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
@@ -55,9 +57,18 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Run]
+; Substituir o Gerenciador de Tarefas: o exe pede administrador sozinho (UAC) e grava
+; a chave IFEO em HKLM, que o instalador por usuario nao alcanca. skipifsilent: a
+; atualizacao silenciosa nao repete (a chave ja esta posta e aponta para o mesmo exe).
+Filename: "{app}\{#AppExe}"; Parameters: "--replace-taskmgr"; Flags: nowait skipifsilent; Tasks: replacetaskmgr
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 ; Atualizacao pelo proprio app: instala em silencio (/VERYSILENT /RELAUNCH=1) e reabre.
 Filename: "{app}\{#AppExe}"; Flags: nowait; Check: RelaunchRequested
+
+[UninstallRun]
+; Restaura o Gerenciador de Tarefas antes de apagar o exe. O proprio exe pede
+; administrador e so mexe se a chave ainda apontar para ele; senao, sai na hora.
+Filename: "{app}\{#AppExe}"; Parameters: "--restore-taskmgr"; RunOnceId: "RestoreTaskmgr"
 
 [Code]
 function RelaunchRequested: Boolean;

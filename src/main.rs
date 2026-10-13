@@ -18,6 +18,26 @@ mod updater;
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
+
+    // Substituição do Gerenciador de Tarefas (antes da instância única, para não
+    // colidir com ela). A instância elevada grava direto no HKLM e sai com código.
+    if let Some(v) = args.iter().find_map(|a| a.strip_prefix("--set-taskmgr=")) {
+        std::process::exit(i32::from(platform::write_task_manager_replacement(v == "1").is_err()));
+    }
+    // Chamado pelo instalador (não elevado): liga pedindo administrador.
+    if has("--replace-taskmgr") {
+        let _ = platform::request_replace_task_manager(true);
+        return Ok(());
+    }
+    // Chamado pelo desinstalador: só restaura se a chave ainda aponta para nós, para
+    // não apagar a de outro programa (Process Explorer) nem pedir UAC à toa.
+    if has("--restore-taskmgr") {
+        if platform::replaces_task_manager() {
+            let _ = platform::request_replace_task_manager(false);
+        }
+        return Ok(());
+    }
+
     // Já aberto: a outra instância aparece e esta sai.
     let Some(_instance) = tray::single_instance(has("--replace")) else { return Ok(()) };
     let start_minimized = has(platform::MINIMIZED_ARG);

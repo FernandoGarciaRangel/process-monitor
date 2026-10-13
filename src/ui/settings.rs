@@ -259,6 +259,24 @@ fn general(app: &mut App, ui: &mut Ui) {
     });
 
     ui.add_space(16.0);
+    heading(ui, "Sistema");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        row(
+            ui,
+            "Substituir o Gerenciador de Tarefas",
+            "Abre o Process Monitor com Ctrl+Shift+Esc ou ao escolher Gerenciador de Tarefas. Pede administrador.",
+            40.0,
+            |ui| {
+                let mut on = app.replaces_taskmgr;
+                if widgets::toggle(ui, &mut on).changed() {
+                    app.set_replace_task_manager(on);
+                }
+            },
+        );
+    });
+
+    ui.add_space(16.0);
     heading(ui, "Coleta");
     widgets::card().show(ui, |ui| {
         ui.set_width(ui.available_width());
