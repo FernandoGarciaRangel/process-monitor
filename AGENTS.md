@@ -217,6 +217,11 @@ criação; case com a coleta pelos dois (±2 s), nunca só pelo PID.
   inteiro, então nessas linhas a ação é `docker stop`, e finalizar fica bloqueado. O
   `docker ps` e o `wsl -l --running` só rodam com a tela de portas aberta e alguma porta
   desses processos, a cada 10 s (60 s se o Docker estiver parado).
+- Servidores sem terminal (`ports::orphan_servers`): de desenvolvimento, com o pai morto
+  e alguma porta em escuta na árvore. Sem a exigência da porta, qualquer script Python ou
+  Node solto que ficou sem pai entrava no aviso.
+- Fechar conexão (`ports::close_connection`, `SetTcpEntry`) só existe para IPv4 e pede
+  administrador; nas conexões IPv6 o botão nem aparece.
 - "Liberar porta" de um servidor de desenvolvimento finaliza a árvore desde
   `server_root`; a tela de portas avisa de projeto rodando duas vezes (`ports::conflicts`).
 

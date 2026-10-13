@@ -189,6 +189,7 @@ enum Action {
     ShowProcess(ProcKey),
     ShowAll,
     StopContainer(String),
+    Terminal(PathBuf),
 }
 
 pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
@@ -236,6 +237,11 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
             }
             Action::ShowAll => app.ports_all = true,
             Action::StopContainer(name) => app.containers.stop(name),
+            Action::Terminal(dir) => {
+                if let Err(e) = platform::open_terminal(&dir) {
+                    app.toast(format!("Não abriu o terminal: {e}"), crate::app::ToastKind::Error, false);
+                }
+            }
         }
     }
 }
@@ -904,6 +910,12 @@ fn port_menu(app: &mut App, ui: &mut Ui, r: &Row, actions: &mut Vec<Action>) {
         && ui.button(format!("{}  Abrir pasta do projeto", icon::FOLDER_OPEN)).clicked()
     {
         actions.push(Action::Explore(dir.clone()));
+        ui.close();
+    }
+    if let Some(dir) = &r.dir
+        && ui.button(format!("{}  Abrir terminal no projeto", icon::TERMINAL_WINDOW)).clicked()
+    {
+        actions.push(Action::Terminal(dir.clone()));
         ui.close();
     }
     if ui.button(format!("{}  Ver na lista de processos", icon::LIST_BULLETS)).clicked() {

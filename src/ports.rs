@@ -149,7 +149,7 @@ impl TcpState {
 }
 
 /// Uma conexão TCP que não é de escuta, com o processo dono.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Connection {
     pub pid: u32,
     pub local: SocketAddr,
@@ -195,6 +195,29 @@ pub fn connections() -> Vec<Connection> {
 }
 
 /// O endereço está na ordem da rede: os bytes na memória já são os octetos.
+/// Derruba uma conexão TCP sem finalizar o processo (`SetTcpEntry` com
+/// `DELETE_TCB`): o programa recebe um reset, como se a rede caísse. Só existe para
+/// IPv4 e pede administrador.
+pub fn close_connection(c: &Connection) -> Result<(), String> {
+    use windows::Win32::NetworkManagement::IpHelper::{MIB_TCP_STATE_DELETE_TCB, MIB_TCPROW_LH, MIB_TCPROW_LH_0, SetTcpEntry};
+    let (SocketAddr::V4(local), SocketAddr::V4(remote)) = (c.local, c.remote) else {
+        return Err("o Windows só fecha conexões IPv4".to_owned());
+    };
+    let row = MIB_TCPROW_LH {
+        Anonymous: MIB_TCPROW_LH_0 { State: MIB_TCP_STATE_DELETE_TCB },
+        dwLocalAddr: u32::from_ne_bytes(local.ip().octets()),
+        dwLocalPort: local.port().to_be() as u32,
+        dwRemoteAddr: u32::from_ne_bytes(remote.ip().octets()),
+        dwRemotePort: remote.port().to_be() as u32,
+    };
+    match unsafe { SetTcpEntry(&row) } {
+        0 => Ok(()),
+        // ERROR_ACCESS_DENIED e ERROR_MR_MID_NOT_FOUND (317), que é o que vem sem administrador.
+        5 | 317 => Err("acesso negado".to_owned()),
+        code => Err(windows::core::HRESULT::from_win32(code).message()),
+    }
+}
+
 fn ipv4_of(raw: u32) -> IpAddr {
     IpAddr::V4(Ipv4Addr::from(raw.to_ne_bytes()))
 }
@@ -392,6 +415,39 @@ pub fn project_label(dir: &Path) -> Option<String> {
         return Some(format!("{parent}\\{last}"));
     }
     Some(last.into_owned())
+}
+
+/// Servidores de desenvolvimento cujo processo pai já morreu: o terminal ou o editor
+/// fechou e o servidor ficou vivo, segurando memória e porta (o Vite preso na 5173). Só a
+/// raiz de cada árvore órfã entra; os filhos dela têm pai vivo. A árvore tem que escutar
+/// alguma porta: um script Python ou Node solto, que só ficou sem pai, não é servidor.
+pub fn orphan_servers<'a>(
+    processes: &'a [ProcInfo],
+    listeners: &[Listener],
+    parent_of: impl Fn(&ProcInfo) -> Option<&'a ProcInfo>,
+) -> Vec<&'a ProcInfo> {
+    let listening: std::collections::HashSet<u32> = listeners.iter().map(|l| l.pid).collect();
+    let tree_listens = |root: &ProcInfo| {
+        // Busca pelos descendentes, com o mesmo cuidado de PID reaproveitado do snapshot.
+        let mut stack = vec![root];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(p) = stack.pop() {
+            if !seen.insert(p.pid) {
+                continue;
+            }
+            if listening.contains(&p.pid) {
+                return true;
+            }
+            stack.extend(processes.iter().filter(|c| c.parent == Some(p.pid) && c.pid != p.pid && c.start_time >= p.start_time));
+        }
+        false
+    };
+    processes
+        .iter()
+        // PID pai 0 ou 4 é o próprio sistema: nunca teve terminal.
+        .filter(|p| p.parent.is_some_and(|pp| pp > 4) && classify(p).is_some() && parent_of(p).is_none())
+        .filter(|p| tree_listens(p))
+        .collect()
 }
 
 // ── Conflitos ──────────────────────────────────────────────────────────────
@@ -903,6 +959,54 @@ mod tests {
 
     fn listening(port: u16, pid: u32) -> Listener {
         Listener { port, pid, addrs: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)] }
+    }
+
+    #[test]
+    fn servidores_sem_terminal() {
+        let terminal = proc(1, Some(500), 10, "WindowsTerminal.exe");
+        let mut vivo = node("node vite");
+        vivo.pid = 2;
+        vivo.parent = Some(1);
+        vivo.start_time = 20;
+        // O pai 300 morreu: órfão.
+        let mut orfao = node("node vite");
+        orfao.pid = 4000;
+        orfao.parent = Some(300);
+        orfao.start_time = 30;
+        // Filho do órfão: tem pai vivo, não entra (vai junto na árvore).
+        let mut filho = node("node esbuild");
+        filho.pid = 4001;
+        filho.parent = Some(4000);
+        filho.start_time = 31;
+        // Pai morto, mas não é de desenvolvimento.
+        let chrome = proc(5, Some(300), 40, "chrome.exe");
+        // Script Python sem pai e sem porta: não é servidor.
+        let mut script = proc(6, Some(300), 50, "python.exe");
+        script.cmd = "python -c print()".to_owned();
+        let procs = vec![terminal, vivo, orfao, filho, chrome, script];
+        let parent_of = |c: &ProcInfo| procs.iter().find(|p| Some(p.pid) == c.parent && p.start_time <= c.start_time);
+        // Quem escuta é o filho: a raiz órfã entra pela árvore.
+        let listeners = [listening(5173, 4001), listening(5174, 2)];
+        let found: Vec<u32> = orphan_servers(&procs, &listeners, parent_of).iter().map(|p| p.pid).collect();
+        assert_eq!(found, vec![4000]);
+        assert!(orphan_servers(&procs, &[], parent_of).is_empty(), "sem porta, nenhum");
+    }
+
+    /// Fechar uma conexão de verdade: sem administrador o Windows recusa, e a mensagem
+    /// tem que ser "acesso negado" (não um erro de estrutura mal montada).
+    #[test]
+    fn fecha_conexao_ou_recusa_sem_admin() {
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let client = std::net::TcpStream::connect(addr).unwrap();
+        let (_accepted, _) = server.accept().unwrap();
+        let c = Connection { pid: std::process::id(), local: client.local_addr().unwrap(), remote: addr, state: TcpState::Established };
+        match close_connection(&c) {
+            Ok(()) => assert!(crate::platform::is_elevated()),
+            Err(e) => assert_eq!((e.as_str(), crate::platform::is_elevated()), ("acesso negado", false)),
+        }
+        let v6 = Connection { local: "[::1]:1".parse().unwrap(), remote: "[::1]:2".parse().unwrap(), ..c };
+        assert!(close_connection(&v6).is_err());
     }
 
     #[test]

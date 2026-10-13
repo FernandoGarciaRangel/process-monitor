@@ -341,6 +341,8 @@ pub struct App {
     /// Criado na primeira vez que a tela de serviços abre.
     pub services: Option<services::Manager>,
     pub service_search: String,
+    /// Servidores sem terminal que o usuário já viu e mandou esquecer (nesta execução).
+    pub orphans_dismissed: HashSet<ProcKey>,
     pub selected_service: Option<String>,
     pub startup: ui::startup::State,
     /// Containers do Docker e distros do WSL por trás das portas, lidos com a tela aberta.
@@ -464,6 +466,7 @@ impl App {
             tuning: None,
             services: None,
             service_search: String::new(),
+            orphans_dismissed: HashSet::new(),
             selected_service: None,
             startup: ui::startup::State::new(cc.egui_ctx.clone()),
             containers: containers::Watcher::new(cc.egui_ctx.clone()),
@@ -948,6 +951,65 @@ impl App {
     }
 
     /// `exe` é o nome do executável, a chave dos grupos.
+    /// Finalizar de uma vez os servidores de desenvolvimento sem terminal, cada um com a
+    /// árvore dele.
+    pub fn request_kill_orphans(&mut self, keys: &[ProcKey]) {
+        let Some(snap) = self.snap.clone() else { return };
+        let mut seen = HashSet::new();
+        let targets: Vec<KillTarget> = keys
+            .iter()
+            .flat_map(|k| snap.tree_postorder(*k))
+            .filter(|p| seen.insert(p.key()))
+            .map(KillTarget::of)
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let n = keys.len();
+        let (s, others) = (if n == 1 { "" } else { "es" }, targets.len() - n);
+        let children = match others {
+            0 => String::new(),
+            1 => " e 1 processo filho".to_owned(),
+            k => format!(" e {k} processos filhos"),
+        };
+        self.confirm = Some(KillRequest {
+            title: format!("Finalizar {n} servidor{s} sem terminal?"),
+            detail: format!(
+                "{n} servidor{s} de desenvolvimento cujo terminal já fechou{children} serão encerrados. \
+                 Dados não salvos serão perdidos."
+            ),
+            targets,
+            then: None,
+        });
+    }
+
+    /// Derruba a conexão TCP sem finalizar o processo. Pede administrador.
+    pub fn close_connection(&mut self, c: &ports::Connection) {
+        match ports::close_connection(c) {
+            Ok(()) => {
+                self.toast(format!("Conexão com {} fechada", c.remote), ToastKind::Ok, false);
+                self.sampler.refresh_now();
+            }
+            Err(e) => {
+                let denied = e == "acesso negado";
+                self.toast(format!("Não fechou a conexão com {}: {e}", c.remote), ToastKind::Error, denied && !self.elevated);
+            }
+        }
+    }
+
+    /// Terminal na pasta do processo: o diretório de trabalho, ou a do executável.
+    pub fn open_terminal_for(&mut self, p: &ProcInfo) {
+        let dir = p.cwd.clone().or_else(|| p.exe.as_ref().and_then(|e| e.parent().map(|d| d.to_path_buf())));
+        match dir {
+            Some(dir) => {
+                if let Err(e) = platform::open_terminal(&dir) {
+                    self.toast(format!("Não abriu o terminal: {e}"), ToastKind::Error, false);
+                }
+            }
+            None => self.toast("Sem acesso à pasta do processo. Execute como administrador.".to_owned(), ToastKind::Error, false),
+        }
+    }
+
     pub fn request_kill_group(&mut self, exe: &str) {
         let Some(snap) = self.snap.clone() else { return };
         let targets: Vec<KillTarget> = snap.processes.iter().filter(|p| p.name == exe).map(KillTarget::of).collect();

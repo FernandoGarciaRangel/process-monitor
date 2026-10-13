@@ -488,7 +488,22 @@ pub fn spawn_in_console(cmd: &str, cwd: &Path, title: &str) -> Result<(), String
         .map_err(|e| e.to_string())
 }
 
-/// Argumentos do `cmd.exe`: `/k "title <título> & <comando>"`. Com `/k` seguido de aspas,
+/// Abre um terminal novo em `dir`: o Windows Terminal, se instalado, senão o `cmd`.
+pub fn open_terminal(dir: &Path) -> Result<(), String> {
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    let wt = std::process::Command::new("wt.exe").arg("-d").arg(dir).spawn();
+    if wt.is_ok() {
+        return Ok(());
+    }
+    std::process::Command::new("cmd.exe")
+        .current_dir(dir)
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Argumentos do `cmd.exe`:`/k "title <título> & <comando>"`. Com `/k` seguido de aspas,
 /// o cmd tira só o primeiro e o último caractere, então as aspas do comando sobrevivem.
 fn console_args(cmd: &str, title: &str) -> String {
     // No título, os caracteres especiais do cmd encerrariam o comando no meio.

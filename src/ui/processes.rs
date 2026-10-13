@@ -1,6 +1,6 @@
 //! Lista de processos: busca, ordenação, agrupamento por nome e ações.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use egui::{Align, Align2, CornerRadius, Key, Layout, RichText, Sense, Stroke, Ui, pos2, vec2};
@@ -119,6 +119,10 @@ enum Action {
     ToggleGroup(String),
     Explore(PathBuf),
     Copy(String),
+    Terminal(ProcKey),
+    KillOrphans(Vec<ProcKey>),
+    DismissOrphans(Vec<ProcKey>),
+    ShowOrphans(Vec<ProcKey>),
 }
 
 pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
@@ -142,6 +146,11 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
 
     toolbar(app, ui, snap, visible.len());
     ui.add_space(12.0);
+    // Servidores cujo terminal fechou: aviso em cima da lista e marca na linha.
+    let orphans: HashSet<ProcKey> =
+        crate::ports::orphan_servers(&snap.processes, &snap.listeners, |c| snap.parent_of(c)).iter().map(|p| p.key()).collect();
+    let mut actions: Vec<Action> = Vec::new();
+    orphans_banner(app, ui, snap, &orphans, &mut actions);
 
     keyboard(app, ui, &rows);
 
@@ -159,10 +168,10 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
 
     if rows.is_empty() {
         empty_state(ui, &app.search);
+        apply(app, ui, snap, actions);
         return;
     }
 
-    let mut actions: Vec<Action> = Vec::new();
     let selected = app.selected;
     let scroll_row = if app.scroll_to_selected {
         app.scroll_to_selected = false;
@@ -203,7 +212,7 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
                     Row::Proc { p, child } => {
                         row.set_selected(Some(p.key()) == selected);
                         for col in &cols {
-                            row.col(|ui| proc_cell(app, ui, snap, p, *child, *col));
+                            row.col(|ui| proc_cell(app, ui, snap, p, *child, *col, orphans.contains(&p.key())));
                         }
                         let response = row.response();
                         if response.clicked() || response.secondary_clicked() {
@@ -225,7 +234,10 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
             });
         });
     columns::dividers(ui, "processes", &cols, &header_cells, rows.len(), ROW_HEIGHT);
+    apply(app, ui, snap, actions);
+}
 
+fn apply(app: &mut App, ui: &mut Ui, snap: &Snapshot, actions: Vec<Action>) {
     for action in actions {
         match action {
             Action::Select(key) => app.select(Some(key)),
@@ -240,6 +252,16 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
             }
             Action::Explore(path) => crate::platform::open_in_explorer(&path),
             Action::Copy(text) => ui.ctx().copy_text(text),
+            Action::Terminal(key) => {
+                if let Some(p) = snap.find(key) {
+                    app.open_terminal_for(p);
+                }
+            }
+            Action::KillOrphans(keys) => app.request_kill_orphans(&keys),
+            Action::DismissOrphans(keys) => app.orphans_dismissed.extend(keys),
+            Action::ShowOrphans(keys) => {
+                app.search = keys.iter().map(|k| k.pid.to_string()).collect::<Vec<_>>().join(", ");
+            }
         }
     }
 }
@@ -346,7 +368,7 @@ fn header_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, col: Col) {
     }
 }
 
-fn proc_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, p: &ProcInfo, child: bool, col: Col) {
+fn proc_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, p: &ProcInfo, child: bool, col: Col, orphan: bool) {
     match col {
         Col::Name => {
             ui.add_space(if child { 34.0 } else { 8.0 });
@@ -355,6 +377,10 @@ fn proc_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, p: &ProcInfo, child: b
             ui.add_space(4.0);
             if p.suspended {
                 suspended_pill(ui);
+            }
+            if orphan {
+                pill(ui, &format!("{}  sem terminal", icon::LINK_BREAK), theme::ACCENT)
+                    .on_hover_text("O terminal ou o editor que abriu este servidor já fechou, e ele continua rodando.");
             }
             name_label(ui, p.display_name(), p.exe_hint(), theme::regular(13.0));
         }
@@ -408,12 +434,69 @@ fn name_label(ui: &mut Ui, primary: &str, hint: Option<&str>, font: egui::FontId
 
 /// "Suspenso" antes do nome: o processo não roda nada até ser retomado.
 pub(super) fn suspended_pill(ui: &mut Ui) {
-    let text = format!("{}  suspenso", icon::PAUSE);
-    let galley = ui.painter().layout_no_wrap(text, theme::regular(11.0), theme::ACCENT);
-    let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 12.0, 18.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(9), theme::ACCENT.gamma_multiply(0.14));
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, theme::ACCENT);
+    pill(ui, &format!("{}  suspenso", icon::PAUSE), theme::ACCENT);
+}
+
+/// Etiqueta pequena antes do nome, na cor dada.
+fn pill(ui: &mut Ui, text: &str, color: egui::Color32) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), theme::regular(11.0), color);
+    let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 12.0, 18.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(9), color.gamma_multiply(0.14));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     ui.add_space(2.0);
+    response
+}
+
+/// Aviso dos servidores de desenvolvimento que ficaram sem terminal. Some quando eles
+/// encerram ou quando o usuário dispensa (só nesta execução).
+fn orphans_banner(app: &App, ui: &mut Ui, snap: &Snapshot, orphans: &HashSet<ProcKey>, actions: &mut Vec<Action>) {
+    let mut keys: Vec<ProcKey> = orphans.iter().filter(|k| !app.orphans_dismissed.contains(k)).copied().collect();
+    if keys.is_empty() {
+        return;
+    }
+    keys.sort_by_key(|k| k.start);
+    let names: Vec<String> = keys
+        .iter()
+        .filter_map(|k| snap.find(*k))
+        .map(|p| {
+            let project = crate::ports::project_dir(p).and_then(|d| crate::ports::project_label(&d));
+            let kind = crate::ports::classify(p).map(|k| k.label()).unwrap_or_default();
+            match project {
+                Some(project) => format!("{project} ({kind})"),
+                None => format!("{} ({kind})", p.display_name()),
+            }
+        })
+        .collect();
+    let shown = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let more = if names.len() > 3 { format!(" e mais {}", names.len() - 3) } else { String::new() };
+    let n = keys.len();
+    let text = if n == 1 {
+        format!("1 servidor de desenvolvimento continua rodando sem terminal: {shown}.")
+    } else {
+        format!("{n} servidores de desenvolvimento continuam rodando sem terminal: {shown}{more}.")
+    };
+    widgets::card().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(icon::LINK_BREAK).font(theme::regular(16.0)).color(theme::ACCENT));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::icon_button(ui, icon::X, "Dispensar até reabrir o app").clicked() {
+                    actions.push(Action::DismissOrphans(keys.clone()));
+                }
+                let label = if n == 1 { "Finalizar".to_owned() } else { "Finalizar todos".to_owned() };
+                if widgets::danger_button(ui, &label, true).on_hover_text("Finaliza cada um com os processos filhos").clicked() {
+                    actions.push(Action::KillOrphans(keys.clone()));
+                }
+                if widgets::ghost_button(ui, "Ver").on_hover_text("Filtrar a lista por eles").clicked() {
+                    actions.push(Action::ShowOrphans(keys.clone()));
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(text).font(theme::regular(12.5)).color(INK_2)).wrap());
+                });
+            });
+        });
+    });
+    ui.add_space(10.0);
 }
 
 fn count_pill(ui: &mut Ui, n: usize) {
@@ -466,6 +549,10 @@ fn proc_menu(app: &mut App, ui: &mut Ui, p: &ProcInfo, actions: &mut Vec<Action>
             actions.push(Action::Copy(exe.display().to_string()));
             ui.close();
         }
+    }
+    if (p.cwd.is_some() || p.exe.is_some()) && ui.button(format!("{}  Abrir terminal na pasta", icon::TERMINAL_WINDOW)).clicked() {
+        actions.push(Action::Terminal(p.key()));
+        ui.close();
     }
     if !p.cmd.is_empty() && ui.button(format!("{}  Copiar linha de comando", icon::TERMINAL)).clicked() {
         actions.push(Action::Copy(p.cmd.clone()));

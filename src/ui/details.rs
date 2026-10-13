@@ -116,6 +116,16 @@ fn body(app: &mut App, ui: &mut Ui) {
             command_line(ui, &p.cmd);
             ui.add_space(8.0);
             path_row(ui, "Diretório de trabalho", p.cwd.as_ref().map(|c| c.display().to_string()), None);
+            if p.cwd.is_some() || p.exe.is_some() {
+                ui.add_space(4.0);
+                let open = egui::Button::new(
+                    RichText::new(format!("{}  Abrir terminal na pasta", icon::TERMINAL_WINDOW)).font(theme::regular(12.5)).color(ACCENT),
+                )
+                .frame(false);
+                if ui.add(open).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    app.open_terminal_for(p);
+                }
+            }
             ui.add_space(18.0);
 
             widgets::section_label(ui, "Execução");
@@ -463,6 +473,7 @@ fn connections_section(app: &mut App, ui: &mut Ui, snap: &Snapshot, conns: &[&Co
     widgets::section_label(ui, &format!("Conexões · {}", conns.len()));
     ui.add_space(4.0);
     let mut chosen: Option<ProcKey> = None;
+    let mut close: Option<Connection> = None;
     for c in conns.iter().take(MAX) {
         let peer = c
             .remote
@@ -474,6 +485,17 @@ fn connections_section(app: &mut App, ui: &mut Ui, snap: &Snapshot, conns: &[&Co
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                // O Windows só fecha conexão IPv4; nas outras o botão nem aparece.
+                if c.remote.is_ipv4() {
+                    let tip = if app.elevated {
+                        "Fechar a conexão (o processo continua rodando)"
+                    } else {
+                        "Fechar a conexão (o processo continua rodando). Pede administrador."
+                    };
+                    if widgets::icon_button(ui, icon::PLUGS, tip).clicked() {
+                        close = Some(**c);
+                    }
+                }
                 if widgets::icon_button(ui, icon::COPY, "Copiar endereço remoto").clicked() {
                     ui.ctx().copy_text(c.remote.to_string());
                 }
@@ -501,6 +523,9 @@ fn connections_section(app: &mut App, ui: &mut Ui, snap: &Snapshot, conns: &[&Co
     if chosen.is_some() {
         app.select(chosen);
         app.scroll_to_selected = true;
+    }
+    if let Some(c) = close {
+        app.close_connection(&c);
     }
 }
 
