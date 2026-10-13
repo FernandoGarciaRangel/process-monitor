@@ -141,6 +141,8 @@ versão do redirecionamento de `github.com/<repo>/releases/latest` e baixa
 - O app roda o instalador com `/VERYSILENT … /RELAUNCH=1` e fecha; o `[Code]` do
   `.iss` lê `/RELAUNCH` e abre o app no fim. Sem isso, a instalação silenciosa não
   reabre nada (`skipifsilent`).
+- 🔴 Essa entrada do `[Run]` tem `runasoriginaluser`: na instalação para todos o
+  instalador está elevado, e sem a flag o app atualizado voltava como administrador.
 - Com o automático ligado, a versão baixada também avisa num balão do Windows
   (`App::announce_update`), uma vez por versão em cada execução.
 - Release sem token: o repositório tem que ser público para isso funcionar.

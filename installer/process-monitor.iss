@@ -67,7 +67,9 @@ Filename: "{app}\{#AppExe}"; Parameters: "--repoint-taskmgr"; Flags: waituntilte
 Filename: "{app}\{#AppExe}"; Parameters: "--replace-taskmgr"; Flags: nowait skipifsilent; Tasks: replacetaskmgr
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 ; Atualizacao pelo proprio app: instala em silencio (/VERYSILENT /RELAUNCH=1) e reabre.
-Filename: "{app}\{#AppExe}"; Flags: nowait; Check: RelaunchRequested
+; runasoriginaluser: na instalacao para todos o instalador esta elevado, e sem a flag o
+; app voltava como administrador (e o Windows bloqueia arrastar e soltar de outros apps).
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: RelaunchRequested
 
 [UninstallRun]
 ; Restaura o Gerenciador de Tarefas antes de apagar o exe. O proprio exe pede
