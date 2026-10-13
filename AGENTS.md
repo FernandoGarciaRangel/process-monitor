@@ -212,6 +212,11 @@ criação; case com a coleta pelos dois (±2 s), nunca só pelo PID.
   com ela aberta. O tipo de inicialização fica em cache (uma chamada por serviço).
 - `src/startup.rs`: ligar e desligar escreve em `Explorer\StartupApproved`, o mesmo do
   Gerenciador de Tarefas. A lista é lida numa thread: a descrição de cada exe pode demorar.
+- 🔴 Portas do Docker e do WSL (`src/containers.rs`): a porta de um container é escutada
+  pelo `com.docker.backend.exe`. "Liberar porta" ali derrubaria o Docker Desktop
+  inteiro, então nessas linhas a ação é `docker stop`, e finalizar fica bloqueado. O
+  `docker ps` e o `wsl -l --running` só rodam com a tela de portas aberta e alguma porta
+  desses processos, a cada 10 s (60 s se o Docker estiver parado).
 - "Liberar porta" de um servidor de desenvolvimento finaliza a árvore desde
   `server_root`; a tela de portas avisa de projeto rodando duas vezes (`ports::conflicts`).
 

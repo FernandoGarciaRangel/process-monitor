@@ -8,7 +8,7 @@ use egui::{Align2, Color32, CornerRadius, Frame, Id, Margin, RichText, Stroke, v
 use egui_phosphor::regular as icon;
 
 use crate::icons::IconCache;
-use crate::{control, export, services};
+use crate::{containers, control, export, services};
 use crate::platform::{self, KillError};
 use crate::ports::{self, Kind, PortRange, Prober, Statuses, Target};
 use crate::sampler::{ProcInfo, ProcKey, Sampler, Series, Snapshot};
@@ -343,6 +343,9 @@ pub struct App {
     pub service_search: String,
     pub selected_service: Option<String>,
     pub startup: ui::startup::State,
+    /// Containers do Docker e distros do WSL por trás das portas, lidos com a tela aberta.
+    pub containers: containers::Watcher,
+    pub container_info: Arc<containers::Info>,
 }
 
 const INTERVAL_KEY: &str = "interval_ms";
@@ -463,6 +466,8 @@ impl App {
             service_search: String::new(),
             selected_service: None,
             startup: ui::startup::State::new(cc.egui_ctx.clone()),
+            containers: containers::Watcher::new(cc.egui_ctx.clone()),
+            container_info: Arc::default(),
         };
         app.install_alerts();
         app
@@ -1100,6 +1105,23 @@ impl App {
         }
     }
 
+    /// Docker e WSL só são consultados com a tela de portas aberta e alguma porta deles.
+    fn containers_logic(&mut self) {
+        let wanted = self.view == View::Ports
+            && self.snap.as_ref().is_some_and(|s| {
+                let owners: HashSet<u32> = s.listeners.iter().map(|l| l.pid).collect();
+                s.processes.iter().any(|p| owners.contains(&p.pid) && (containers::is_docker(&p.name) || containers::is_wsl(&p.name)))
+            });
+        self.containers.poll(wanted);
+        self.container_info = self.containers.latest();
+        for (name, result) in self.containers.take_stopped() {
+            match result {
+                Ok(()) => self.toast(format!("Container {name} parado"), ToastKind::Ok, false),
+                Err(e) => self.toast(format!("Não parou o container {name}: {e}"), ToastKind::Error, false),
+            }
+        }
+    }
+
     /// A thread dos serviços nasce na primeira visita à tela e só relê com ela aberta.
     fn services_logic(&mut self, ctx: &egui::Context) {
         let visible = self.view == View::Services;
@@ -1284,6 +1306,7 @@ impl eframe::App for App {
             }
         }
         self.services_logic(ctx);
+        self.containers_logic();
         if self.view == View::Startup {
             self.startup.ensure_loaded();
         }

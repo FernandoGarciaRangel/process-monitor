@@ -3,6 +3,7 @@
 
 mod alerts;
 mod app;
+mod containers;
 mod control;
 mod export;
 mod format;

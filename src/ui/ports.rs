@@ -13,6 +13,7 @@ use egui_extras::TableBuilder;
 use egui_phosphor::regular as icon;
 
 use crate::app::{App, PortSort, View};
+use crate::containers::{self, Container};
 use crate::format;
 use crate::platform;
 use crate::ports::{self, Kind, Listener, PortRange, PortStatus, Reply, Statuses};
@@ -33,6 +34,10 @@ struct Row<'a> {
     dir: Option<PathBuf>,
     project: Option<String>,
     status: Option<&'a PortStatus>,
+    /// Porta publicada por um container: o processo é o do Docker Desktop.
+    container: Option<&'a Container>,
+    /// Porta escutada pelo Docker ou pelo `wslrelay`: (etiqueta, nome a mostrar).
+    external: Option<(&'static str, String)>,
 }
 
 impl Row<'_> {
@@ -42,8 +47,10 @@ impl Row<'_> {
 
     /// O projeto, se for um servidor de desenvolvimento; senão o nome do processo.
     fn name(&self) -> String {
-        self.project
-            .clone()
+        self.external
+            .as_ref()
+            .map(|(_, name)| name.clone())
+            .or_else(|| self.project.clone())
             .or_else(|| self.p.map(|p| p.display_name().to_owned()))
             .unwrap_or_else(|| format!("PID {}", self.l.pid))
     }
@@ -62,12 +69,31 @@ impl Row<'_> {
         if let Some(title) = self.status.and_then(|s| s.title()) {
             return Some(title.to_owned());
         }
+        if let Some(c) = self.container {
+            return Some(c.image.clone());
+        }
         let p = self.p?;
         if self.project.is_some() {
             let args = args_of(&p.cmd);
             return (!args.is_empty()).then(|| args.to_owned());
         }
         p.exe_hint().map(str::to_owned)
+    }
+
+    /// Etiqueta ao lado do nome: a plataforma, ou Docker e WSL.
+    fn tag(&self) -> Option<&'static str> {
+        self.external.as_ref().map(|(tag, _)| *tag).or(self.kind.map(Kind::label))
+    }
+
+    /// Finalizar o dono da porta derrubaria o Docker Desktop inteiro (ou só o
+    /// encaminhamento do WSL, com o servidor ainda de pé): a ação certa é outra.
+    fn kill_blocked(&self) -> Option<&'static str> {
+        match &self.external {
+            Some(("Docker", _)) if self.container.is_some() => Some("Porta de container: use Parar container."),
+            Some(("Docker", _)) => Some("Porta do Docker Desktop: finalizar derrubaria o Docker inteiro."),
+            Some(_) => Some("Porta encaminhada do WSL: pare o servidor dentro do WSL."),
+            None => None,
+        }
     }
 }
 
@@ -162,12 +188,14 @@ enum Action {
     Explore(PathBuf),
     ShowProcess(ProcKey),
     ShowAll,
+    StopContainer(String),
 }
 
 pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
     let statuses = app.port_status.clone();
     let procs: HashMap<u32, &ProcInfo> = snap.processes.iter().map(|p| (p.pid, p)).collect();
-    let listed = build_rows(snap, &procs, &statuses, &app.port_ranges, app.ports_all);
+    let info = app.container_info.clone();
+    let listed = build_rows(snap, &procs, &statuses, &app.port_ranges, app.ports_all, &info);
     let total = listed.len();
     let terms = search_terms(&app.port_search);
     let mut rows: Vec<Row> = listed.into_iter().filter(|r| matches(r, &terms)).collect();
@@ -207,6 +235,7 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
                 app.scroll_to_selected = true;
             }
             Action::ShowAll => app.ports_all = true,
+            Action::StopContainer(name) => app.containers.stop(name),
         }
     }
 }
@@ -217,18 +246,33 @@ fn build_rows<'a>(
     statuses: &'a Statuses,
     ranges: &[PortRange],
     all: bool,
+    info: &'a containers::Info,
 ) -> Vec<Row<'a>> {
     snap.listeners
         .iter()
         .filter_map(|l| {
             let p = procs.get(&l.pid).copied();
             let kind = p.and_then(ports::classify);
-            if !all && kind.is_none() && !ports::in_ranges(ranges, l.port) {
+            // O Docker Desktop escuta a porta publicada duas vezes: pelo backend e pelo
+            // `wslrelay` (no `::1`). As duas linhas são do container.
+            let container = p
+                .filter(|p| containers::is_docker(&p.name) || containers::is_wsl(&p.name))
+                .and_then(|_| info.docker.get(&l.port));
+            let external = match p.map(|p| p.name.as_str()) {
+                Some(n) if containers::is_docker(n) || container.is_some() => {
+                    Some(("Docker", container.map(|c| c.name.clone()).unwrap_or_else(|| "Docker Desktop".to_owned())))
+                }
+                Some(n) if containers::is_wsl(n) => Some(("WSL", info.wsl_label())),
+                _ => None,
+            };
+            // Containers e servidores no WSL são de desenvolvimento: aparecem sem "Todas".
+            let wsl = external.as_ref().is_some_and(|(tag, _)| *tag == "WSL");
+            if !all && kind.is_none() && container.is_none() && !wsl && !ports::in_ranges(ranges, l.port) {
                 return None;
             }
             let dir = kind.and(p).and_then(ports::project_dir);
             let project = dir.as_deref().and_then(ports::project_label);
-            Some(Row { l, p, kind, dir, project, status: statuses.get(&(l.port, l.pid)) })
+            Some(Row { l, p, kind, dir, project, status: statuses.get(&(l.port, l.pid)), container, external })
         })
         .collect()
 }
@@ -241,18 +285,30 @@ fn toolbar(app: &mut App, ui: &mut Ui, shown: usize, total: usize, selected: Opt
         ui.label(RichText::new(count).font(theme::regular(13.0)).color(INK_3));
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let target = selected.and_then(|r| r.p.map(|p| (p.key(), p.name.clone(), r.l.port)));
-            let protected = target.as_ref().is_some_and(|(k, name, _)| app.is_protected(*k, name));
-            let kill = widgets::danger_button(ui, &format!("{}  Liberar porta", icon::X_CIRCLE), target.is_some() && !protected);
-            let kill = if protected {
-                kill.on_disabled_hover_text("Processo crítico do sistema: finalizar derrubaria o Windows.")
+            if let Some(c) = selected.and_then(|r| r.container) {
+                // Porta de container: o botão para o container, não o Docker Desktop.
+                if widgets::danger_button(ui, &format!("{}  Parar container", icon::STOP), true)
+                    .on_hover_text(format!("docker stop {} (Delete)", c.name))
+                    .clicked()
+                {
+                    actions.push(Action::StopContainer(c.name.clone()));
+                }
             } else {
-                kill.on_hover_text("Finalizar o processo que escuta a porta selecionada (Delete)")
-            };
-            if kill.clicked()
-                && let Some((key, _, port)) = target
-            {
-                actions.push(Action::Kill(key, port));
+                let blocked = selected.and_then(Row::kill_blocked);
+                let target = selected.and_then(|r| r.p.map(|p| (p.key(), p.name.clone(), r.l.port)));
+                let protected = target.as_ref().is_some_and(|(k, name, _)| app.is_protected(*k, name));
+                let enabled = target.is_some() && !protected && blocked.is_none();
+                let kill = widgets::danger_button(ui, &format!("{}  Liberar porta", icon::X_CIRCLE), enabled);
+                let kill = match blocked {
+                    Some(reason) => kill.on_disabled_hover_text(reason),
+                    None if protected => kill.on_disabled_hover_text("Processo crítico do sistema: finalizar derrubaria o Windows."),
+                    None => kill.on_hover_text("Finalizar o processo que escuta a porta selecionada (Delete)"),
+                };
+                if kill.clicked()
+                    && let Some((key, _, port)) = target
+                {
+                    actions.push(Action::Kill(key, port));
+                }
             }
 
             let open = selected.filter(|r| r.http());
@@ -403,7 +459,13 @@ fn conflicts_banner(app: &mut App, ui: &mut Ui, snap: &Snapshot, procs: &HashMap
     let found: Vec<ports::Conflict> = ports::conflicts(&snap.listeners, &snap.processes, |c| snap.parent_of(c))
         .into_iter()
         .filter(|c| match c {
-            ports::Conflict::SharedPort { port, pids } => relevant(*port, pids),
+            // Docker e WSL escutam a mesma porta em dois processos de propósito.
+            ports::Conflict::SharedPort { port, pids } => {
+                relevant(*port, pids)
+                    && !pids.iter().all(|pid| {
+                        procs.get(pid).is_some_and(|p| containers::is_docker(&p.name) || containers::is_wsl(&p.name))
+                    })
+            }
             ports::Conflict::Duplicate { .. } => true,
         })
         .take(3)
@@ -709,7 +771,7 @@ fn name_cell(app: &mut App, ui: &mut Ui, r: &Row) {
     let detail = r.detail();
     let line1_y = if detail.is_some() { rect.center().y - 8.5 } else { rect.center().y };
 
-    let tag = r.kind.map(|k| k.label());
+    let tag = r.tag();
     let tag_galley = tag.map(|t| text_galley(ui, t, theme::regular(11.0), INK_2, f32::INFINITY));
     let tag_width = tag_galley.as_ref().map_or(0.0, |g| g.size().x + 10.0 + 6.0);
     let name = text_galley(ui, &r.name(), theme::semibold(13.0), INK, (width - tag_width).max(20.0));
@@ -781,12 +843,32 @@ fn port_menu(app: &mut App, ui: &mut Ui, r: &Row, actions: &mut Vec<Action>) {
     }
     let Some(p) = r.p else { return };
     ui.separator();
+    if let Some(c) = r.container {
+        let stop = egui::Button::new(RichText::new(format!("{}  Parar container", icon::STOP)).color(theme::DANGER))
+            .shortcut_text("Del");
+        if ui.add(stop).on_hover_text(format!("docker stop {}", c.name)).clicked() {
+            actions.push(Action::StopContainer(c.name.clone()));
+            ui.close();
+        }
+        if ui.button(format!("{}  Copiar nome do container", icon::COPY)).clicked() {
+            actions.push(Action::Copy(c.name.clone()));
+            ui.close();
+        }
+    }
     let protected = app.is_protected(p.key(), &p.name);
-    let kill = egui::Button::new(RichText::new(format!("{}  Liberar porta", icon::X_CIRCLE)).color(theme::DANGER))
-        .shortcut_text("Del");
-    if ui.add_enabled(!protected, kill).on_hover_text("Finaliza o processo que escuta a porta").clicked() {
-        actions.push(Action::Kill(p.key(), r.l.port));
-        ui.close();
+    let blocked = r.kill_blocked();
+    if r.container.is_none() {
+        let kill = egui::Button::new(RichText::new(format!("{}  Liberar porta", icon::X_CIRCLE)).color(theme::DANGER))
+            .shortcut_text("Del");
+        let kill = ui.add_enabled(!protected && blocked.is_none(), kill);
+        let kill = match blocked {
+            Some(reason) => kill.on_disabled_hover_text(reason),
+            None => kill.on_hover_text("Finaliza o processo que escuta a porta"),
+        };
+        if kill.clicked() {
+            actions.push(Action::Kill(p.key(), r.l.port));
+            ui.close();
+        }
     }
     if protected {
         ui.label(RichText::new("Processo crítico do sistema").font(theme::regular(11.5)).color(INK_3));
@@ -863,8 +945,11 @@ fn keyboard(app: &mut App, ui: &Ui, rows: &[Row], selected: Option<usize>, actio
         if enter && r.http() {
             actions.push(Action::Open(r.l.url()));
         }
-        if delete
+        if delete && let Some(c) = r.container {
+            actions.push(Action::StopContainer(c.name.clone()));
+        } else if delete
             && let Some(p) = r.p
+            && r.kill_blocked().is_none()
             && !app.is_protected(p.key(), &p.name)
         {
             actions.push(Action::Kill(p.key(), r.l.port));
@@ -921,13 +1006,17 @@ fn matches(r: &Row, terms: &[String]) -> bool {
         text.push(' ');
         text.push_str(&p.name);
     }
-    if let Some(kind) = r.kind {
-        text.push(' ');
-        text.push_str(kind.label());
-    }
     if let Some(title) = r.status.and_then(|s| s.title()) {
         text.push(' ');
         text.push_str(title);
+    }
+    if let Some(tag) = r.tag() {
+        text.push(' ');
+        text.push_str(tag);
+    }
+    if let Some(c) = r.container {
+        text.push(' ');
+        text.push_str(&c.image);
     }
     let text = text.to_lowercase();
     terms.iter().any(|t| port.starts_with(t.as_str()) || pid == *t || text.contains(t.as_str()))
