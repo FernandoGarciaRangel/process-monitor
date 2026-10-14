@@ -16,6 +16,8 @@ use crate::ui::widgets;
 
 const ROW_HEIGHT: f32 = 30.0;
 const HEADER_HEIGHT: f32 = 42.0;
+/// Faixa da seta no começo da linha do grupo: o clique ali abre e fecha o grupo.
+const CARET_WIDTH: f32 = 26.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Col {
@@ -97,13 +99,18 @@ impl TableCol for Col {
 
 /// Uma linha da tabela: processo solto, cabeçalho de grupo ou membro de grupo aberto.
 enum Row<'a> {
-    Proc { p: &'a ProcInfo, child: bool },
+    /// `depth`: 0 fora de grupo, 1 no grupo, mais 1 por nível abaixo do pai no grupo.
+    Proc { p: &'a ProcInfo, depth: u8 },
     Group(Group<'a>),
 }
 
 struct Group<'a> {
     name: &'a str,
     members: Vec<&'a ProcInfo>,
+    /// O processo principal: o único do grupo cujo pai não é do grupo (o processo
+    /// principal do ClickUp, com os de renderização embaixo). `None` com várias cópias
+    /// independentes, como dois terminais rodando `ping`.
+    root: Option<&'a ProcInfo>,
     cpu: f32,
     memory: u64,
     disk: f64,
@@ -209,10 +216,10 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
             body.rows(ROW_HEIGHT, rows.len(), |mut row| {
                 let r = &rows[row.index()];
                 match r {
-                    Row::Proc { p, child } => {
+                    Row::Proc { p, depth } => {
                         row.set_selected(Some(p.key()) == selected);
                         for col in &cols {
-                            row.col(|ui| proc_cell(app, ui, snap, p, *child, *col, orphans.contains(&p.key())));
+                            row.col(|ui| proc_cell(app, ui, snap, p, *depth, *col, orphans.contains(&p.key())));
                         }
                         let response = row.response();
                         if response.clicked() || response.secondary_clicked() {
@@ -221,12 +228,22 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
                         response.context_menu(|ui| proc_menu(app, ui, p, &mut actions));
                     }
                     Row::Group(g) => {
+                        // Fechado, o grupo fica marcado quando o principal está selecionado.
+                        let open = app.expanded.contains(g.name);
+                        row.set_selected(!open && g.root.is_some_and(|r| Some(r.key()) == selected));
                         for col in &cols {
                             row.col(|ui| group_cell(app, ui, snap, g, *col));
                         }
                         let response = row.response();
-                        if response.clicked() {
+                        // A seta e o duplo clique abrem o grupo; o clique no resto da linha
+                        // seleciona o processo principal (e daí o painel tem "Árvore").
+                        let on_caret = response.interact_pointer_pos().is_some_and(|pos| pos.x < response.rect.left() + CARET_WIDTH);
+                        if response.double_clicked() || (response.clicked() && (on_caret || g.root.is_none())) {
                             actions.push(Action::ToggleGroup(g.name.to_owned()));
+                        } else if (response.clicked() || response.secondary_clicked())
+                            && let Some(root) = g.root
+                        {
+                            actions.push(Action::Select(root.key()));
                         }
                         response.context_menu(|ui| group_menu(app, ui, g, &mut actions));
                     }
@@ -368,10 +385,14 @@ fn header_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, col: Col) {
     }
 }
 
-fn proc_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, p: &ProcInfo, child: bool, col: Col, orphan: bool) {
+fn proc_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, p: &ProcInfo, depth: u8, col: Col, orphan: bool) {
     match col {
         Col::Name => {
-            ui.add_space(if child { 34.0 } else { 8.0 });
+            // No grupo, cada nível abaixo do principal recua mais um pouco (até 3).
+            ui.add_space(match depth {
+                0 => 8.0,
+                d => 34.0 + 16.0 * f32::from(d.min(4) - 1),
+            });
             let texture = app.icons.get(p.exe.as_deref());
             widgets::process_icon(ui, texture.as_ref(), 16.0);
             ui.add_space(4.0);
@@ -580,6 +601,13 @@ fn group_menu(app: &mut App, ui: &mut Ui, g: &Group, actions: &mut Vec<Action>) 
         actions.push(Action::KillGroup(g.name.to_owned()));
         ui.close();
     }
+    // Do principal para baixo: leva junto os filhos com outro nome (crashpad, helpers).
+    if let Some(root) = g.root
+        && ui.add_enabled(!protected, egui::Button::new(format!("{}  Finalizar árvore", icon::TREE_STRUCTURE))).clicked()
+    {
+        actions.push(Action::KillTree(root.key()));
+        ui.close();
+    }
 }
 
 fn keyboard(app: &mut App, ui: &mut Ui, rows: &[Row]) {
@@ -678,7 +706,7 @@ fn build_rows<'a>(app: &App, procs: &[&'a ProcInfo], searching: bool) -> Vec<Row
     if !app.group {
         let mut list: Vec<&ProcInfo> = procs.to_vec();
         list.sort_by(|a, b| order(a, b));
-        return list.into_iter().map(|p| Row::Proc { p, child: false }).collect();
+        return list.into_iter().map(|p| Row::Proc { p, depth: 0 }).collect();
     }
 
     let mut by_name: HashMap<&str, Vec<&ProcInfo>> = HashMap::new();
@@ -693,6 +721,7 @@ fn build_rows<'a>(app: &App, procs: &[&'a ProcInfo], searching: bool) -> Vec<Row
             memory: members.iter().map(|p| p.memory).sum(),
             disk: members.iter().map(|p| p.disk_rate()).sum(),
             gpu: members.iter().map(|p| p.gpu).fold(0.0, f32::max),
+            root: None,
             members,
         })
         .collect();
@@ -714,19 +743,59 @@ fn build_rows<'a>(app: &App, procs: &[&'a ProcInfo], searching: bool) -> Vec<Row
     let mut rows = Vec::new();
     for mut g in groups {
         if g.members.len() == 1 {
-            rows.push(Row::Proc { p: g.members[0], child: false });
+            rows.push(Row::Proc { p: g.members[0], depth: 0 });
             continue;
         }
         g.members.sort_by(|a, b| order(a, b));
+        let tree = member_tree(&g.members);
+        g.root = match tree.iter().filter(|(_, depth)| *depth == 1).count() {
+            1 => Some(tree[0].0),
+            _ => None,
+        };
         // Durante a busca os grupos abrem sozinhos, para o resultado aparecer.
         let open = searching || app.expanded.contains(g.name);
-        let members = g.members.clone();
         rows.push(Row::Group(g));
         if open {
-            rows.extend(members.into_iter().map(|p| Row::Proc { p, child: true }));
+            rows.extend(tree.into_iter().map(|(p, depth)| Row::Proc { p, depth }));
         }
     }
     rows
+}
+
+/// Os membros de um grupo como árvore: cada pai que também é do grupo vem antes dos
+/// filhos, que ficam um nível abaixo. `members` chega ordenado, e a ordem vale entre irmãos.
+fn member_tree<'a>(members: &[&'a ProcInfo]) -> Vec<(&'a ProcInfo, u8)> {
+    // Pai e filho casam por PID e hora de criação: o PID do pai pode ter sido reaproveitado.
+    let parent_of = |c: &ProcInfo| {
+        members.iter().position(|p| Some(p.pid) == c.parent && p.pid != c.pid && p.start_time <= c.start_time)
+    };
+    let parents: Vec<Option<usize>> = members.iter().map(|c| parent_of(c)).collect();
+    fn visit<'a>(
+        i: usize,
+        depth: u8,
+        members: &[&'a ProcInfo],
+        parents: &[Option<usize>],
+        seen: &mut [bool],
+        out: &mut Vec<(&'a ProcInfo, u8)>,
+    ) {
+        if std::mem::replace(&mut seen[i], true) {
+            return;
+        }
+        out.push((members[i], depth));
+        for child in (0..members.len()).filter(|&c| parents[c] == Some(i)) {
+            visit(child, depth.saturating_add(1), members, parents, seen, out);
+        }
+    }
+    let mut seen = vec![false; members.len()];
+    let mut out = Vec::with_capacity(members.len());
+    for i in (0..members.len()).filter(|&i| parents[i].is_none()) {
+        visit(i, 1, members, &parents, &mut seen, &mut out);
+    }
+    // Ciclo (PIDs reaproveitados de um jeito improvável): ninguém some da lista.
+    for i in 0..members.len() {
+        visit(i, 1, members, &parents, &mut seen, &mut out);
+    }
+    out
 }
 
 fn compare(a: &ProcInfo, b: &ProcInfo, key: SortKey) -> std::cmp::Ordering {
@@ -772,6 +841,24 @@ mod tests {
         assert!(matches(&code, &search_terms("20")));
         assert!(!matches(&code, &search_terms("2")), "PID só casa por igualdade");
         assert!(matches(&code, &search_terms("  ")));
+    }
+
+    #[test]
+    fn grupo_em_arvore_com_o_principal_primeiro() {
+        // ClickUp: o principal (pai é o explorer, fora do grupo) e os filhos dele, que
+        // chegam antes dele na ordem da lista; um neto embaixo do primeiro filho.
+        let renderer = proc(30, Some(10), 5, "ClickUp.exe");
+        let gpu = proc(20, Some(10), 5, "ClickUp.exe");
+        let main = proc(10, Some(1), 4, "ClickUp.exe");
+        let grandchild = proc(40, Some(30), 6, "ClickUp.exe");
+        let members = vec![&renderer, &gpu, &main, &grandchild];
+        let tree = |members: &[&ProcInfo]| member_tree(members).into_iter().map(|(p, d)| (p.pid, d)).collect::<Vec<_>>();
+        assert_eq!(tree(&members), vec![(10, 1), (30, 2), (40, 3), (20, 2)]);
+
+        // O pai do 50 é o PID 40, mas reaproveitado: o 50 nasceu antes. Vira outra raiz.
+        let stale = proc(50, Some(40), 1, "ClickUp.exe");
+        let members = vec![&renderer, &gpu, &main, &grandchild, &stale];
+        assert_eq!(tree(&members), vec![(10, 1), (30, 2), (40, 3), (20, 2), (50, 1)]);
     }
 
     #[test]
