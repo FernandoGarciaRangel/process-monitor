@@ -1246,6 +1246,10 @@ impl App {
     /// Resultado das ações repetidas como administrador.
     fn elevation_logic(&mut self) {
         for (request, result) in self.elevator.take() {
+            // No debug, o console do dev.ps1 mostra o resultado: o aviso some sozinho.
+            if cfg!(debug_assertions) {
+                eprintln!("[admin] {:?} -> {result:?}", request.task);
+            }
             match result {
                 Ok(0) => {
                     self.toast(request.success.clone(), ToastKind::Ok);

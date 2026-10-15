@@ -200,14 +200,13 @@ impl Default for Elevator {
 impl Elevator {
     pub fn run(&self, ctx: &egui::Context, request: Request) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
-        // A janela em primeiro plano agora é a do app (o clique foi nela): o UAC abre
-        // na frente dela, em vez de piscar na barra de tarefas.
-        let owner = platform::foreground_window();
         std::thread::Builder::new()
             .name("elevate".into())
             .spawn(move || {
                 let args = format!("{ARG}{}", request.task.encode());
-                let result = platform::run_elevated(&args, owner);
+                // Sem janela dona: a do app é de outra thread. O clique acabou de ser
+                // nela, então o UAC abre na frente mesmo assim.
+                let result = platform::run_elevated(&args, 0);
                 let _ = tx.send((request, result));
                 ctx.request_repaint();
             })

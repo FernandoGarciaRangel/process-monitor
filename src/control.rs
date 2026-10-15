@@ -250,9 +250,7 @@ pub fn suspended_pids(buf: &mut Vec<u8>) -> std::collections::HashSet<u32> {
 fn open(key: ProcKey, access: PROCESS_ACCESS_RIGHTS) -> Result<HandleGuard, KillError> {
     unsafe {
         let guard = HandleGuard(OpenProcess(access, false, key.pid).map_err(platform::open_error)?);
-        if let Some(created) = platform::creation_time(guard.0)
-            && created.abs_diff(key.start) > 2
-        {
+        if platform::pid_reused(platform::creation_time(guard.0), key.start) {
             return Err(KillError::PidReused);
         }
         Ok(guard)

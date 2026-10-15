@@ -97,9 +97,7 @@ pub fn kill(pid: u32, expected_start: u64, name: &str) -> Result<(), KillError> 
             return Err(KillError::Protected);
         }
 
-        if let Some(created) = creation_time(guard.0)
-            && created.abs_diff(expected_start) > 2
-        {
+        if pid_reused(creation_time(guard.0), expected_start) {
             return Err(KillError::PidReused);
         }
 
@@ -168,7 +166,8 @@ pub fn run_elevated(params: &str, owner: isize) -> Result<u32, String> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let mut info = SHELLEXECUTEINFOW {
             cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-            fMask: SEE_MASK_NOCLOSEPROCESS,
+            // NOASYNC: esta thread não tem fila de mensagens para uma ativação assíncrona.
+            fMask: SEE_MASK_NOCLOSEPROCESS | windows::Win32::UI::Shell::SEE_MASK_NOASYNC,
             hwnd: windows::Win32::Foundation::HWND(owner as *mut core::ffi::c_void),
             lpVerb: w!("runas"),
             lpFile: PCWSTR(exe.as_ptr()),
@@ -186,11 +185,6 @@ pub fn run_elevated(params: &str, owner: isize) -> Result<u32, String> {
         GetExitCodeProcess(guard.0, &mut code).map_err(|e| e.message())?;
         Ok(code)
     }
-}
-
-/// Janela em primeiro plano agora, para ser a dona do UAC.
-pub fn foreground_window() -> isize {
-    unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as isize }
 }
 
 /// Abre uma nova instância elevada (UAC). `Ok` quando o usuário aceitou; o chamador
@@ -664,6 +658,13 @@ pub fn account_name(sid: &str) -> Option<String> {
     }
 }
 
+/// O PID agora é de outro processo: a hora de criação difere da esperada (±2 s).
+/// Esperada 0 é "desconhecida": sem administrador, o sysinfo não lê a hora dos
+/// processos do sistema, e é exatamente deles que a cópia elevada (`elevate`) cuida.
+pub(crate) fn pid_reused(created: Option<u64>, expected: u64) -> bool {
+    expected != 0 && created.is_some_and(|c| c.abs_diff(expected) > 2)
+}
+
 /// Hora de criação em segundos Unix.
 pub(crate) unsafe fn creation_time(handle: HANDLE) -> Option<u64> {
     let (mut created, mut exit, mut kernel, mut user) =
@@ -756,6 +757,15 @@ mod tests {
     use super::*;
     use std::process::{Child, Command};
     use std::time::Duration;
+
+    #[test]
+    fn hora_de_criacao_desconhecida_nao_reprova() {
+        assert!(!pid_reused(Some(1000), 1001), "dentro da tolerância");
+        assert!(pid_reused(Some(1000), 1100), "outro processo");
+        assert!(!pid_reused(None, 1100), "sem como ler a hora");
+        // O spoolsv visto sem administrador: a coleta não tinha a hora.
+        assert!(!pid_reused(Some(1_760_000_000), 0));
+    }
 
     /// Mexe no registro do usuário: `cargo test autostart -- --ignored`. Não roda se
     /// já houver uma entrada, para não apagar a do app instalado.
