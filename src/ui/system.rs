@@ -31,7 +31,7 @@ pub fn show(app: &mut App, ui: &mut Ui, s: &Snapshot) {
     ui.add_space(14.0);
     if copy {
         ui.ctx().copy_text(report(&info, s));
-        app.toast("Ficha do computador copiada".to_owned(), crate::app::ToastKind::Ok, false);
+        app.toast("Ficha do computador copiada".to_owned(), crate::app::ToastKind::Ok);
     }
 
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {

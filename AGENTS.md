@@ -271,6 +271,22 @@ consulta custa centenas de milissegundos e exigiria COM na thread da interface.
   para a versão do driver. Só com `gpus` vazio (PDH sem contadores) ela cai no registro.
 - Conferir o que esta máquina devolve: `cargo test ficha -- --ignored --nocapture`.
 
+## Administrador por ação, não o app inteiro
+
+O app roda comum. Elevado, ele quebraria a entrada de inicialização (o Windows ignora
+exe que exige administrador no `Run`), o arrastar do Explorer para "Arquivo em uso" e
+tudo o que ele abre (terminal, servidor reiniciado) herdaria a elevação.
+
+- "Acesso negado" (finalizar, suspender, ajustes, fechar conexão, serviço, inicialização
+  de todos os usuários) vira aviso com **Tentar como admin** (`App::toast_denied`).
+- O botão roda `elevate::Elevator`: uma cópia do exe elevada (UAC) com
+  `--elevated=<tarefa>`, que faz só aquilo e sai. O código de saída é quantas partes
+  falharam. Tratado no `main` antes da instância única.
+- A tarefa vai em hexadecimal (`Task::encode`): nomes de serviço e de entrada de
+  inicialização podem ter espaço e aspas. A cópia elevada confere hora de criação e
+  proteção de novo, como o `kill`.
+- O botão "Executar como administrador" da barra lateral continua, para quem quer.
+
 ## Windows em português
 
 O Windows devolve nomes localizados: a conta `S-1-5-18` é "SISTEMA", as descrições

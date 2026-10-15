@@ -8,7 +8,7 @@ use egui::{Align2, Color32, CornerRadius, Frame, Id, Margin, RichText, Stroke, v
 use egui_phosphor::regular as icon;
 
 use crate::icons::IconCache;
-use crate::{containers, control, export, rules, services};
+use crate::{containers, control, elevate, export, rules, services};
 use crate::platform::{self, KillError};
 use crate::ports::{self, Kind, PortRange, Prober, Statuses, Target};
 use crate::sampler::{ProcInfo, ProcKey, Sampler, Series, Snapshot};
@@ -181,7 +181,8 @@ pub enum ToastKind {
 pub struct Toast {
     pub text: String,
     pub kind: ToastKind,
-    pub offer_elevation: bool,
+    /// "Acesso negado": a ação a repetir como administrador, se o usuário quiser.
+    pub elevate: Option<elevate::Request>,
     pub until: Instant,
 }
 
@@ -343,6 +344,8 @@ pub struct App {
     tuning: Option<(ProcKey, control::Tuning)>,
     /// Criado na primeira vez que a tela de serviços abre.
     pub services: Option<services::Manager>,
+    /// Ações repetidas como administrador (cada uma pede o UAC numa thread).
+    pub elevator: elevate::Elevator,
     pub service_search: String,
     /// Servidores sem terminal que o usuário já viu e mandou esquecer (nesta execução).
     pub orphans_dismissed: HashSet<ProcKey>,
@@ -475,6 +478,7 @@ impl App {
             last_alert: Arc::default(),
             tuning: None,
             services: None,
+            elevator: elevate::Elevator::default(),
             service_search: String::new(),
             orphans_dismissed: HashSet::new(),
             problems_dismissed: HashSet::new(),
@@ -572,7 +576,7 @@ impl App {
     /// Grava no registro; o estado mostrado é sempre o que ficou lá.
     pub fn set_autostart(&mut self, enabled: bool, minimized: bool) {
         if let Err(e) = platform::set_autostart(enabled, minimized) {
-            self.toast(format!("Não alterou a inicialização com o Windows: {e}"), ToastKind::Error, false);
+            self.toast(format!("Não alterou a inicialização com o Windows: {e}"), ToastKind::Error);
         }
         self.autostart = read_autostart();
     }
@@ -587,9 +591,9 @@ impl App {
                 } else {
                     "Gerenciador de Tarefas padrão restaurado"
                 };
-                self.toast(msg.to_owned(), ToastKind::Ok, false);
+                self.toast(msg.to_owned(), ToastKind::Ok);
             }
-            Err(e) => self.toast(format!("Não alterou o Gerenciador de Tarefas: {e}"), ToastKind::Error, false),
+            Err(e) => self.toast(format!("Não alterou o Gerenciador de Tarefas: {e}"), ToastKind::Error),
         }
         self.replaces_taskmgr = platform::replaces_task_manager();
     }
@@ -652,7 +656,7 @@ impl App {
         for table in TABLES {
             ui::columns::reset_widths(ctx, table);
         }
-        self.toast("Configurações redefinidas".to_owned(), ToastKind::Ok, false);
+        self.toast("Configurações redefinidas".to_owned(), ToastKind::Ok);
     }
 
     /// Fecha de verdade, sem cair na bandeja.
@@ -753,7 +757,7 @@ impl App {
         match updater::install(installer) {
             Ok(()) => self.quit(ctx),
             Err(e) => {
-                self.toast(format!("Não abriu o instalador: {e}"), ToastKind::Error, false);
+                self.toast(format!("Não abriu o instalador: {e}"), ToastKind::Error);
                 // O arquivo pode ter sumido (limpeza, antivírus): baixa de novo.
                 self.updater.check_now();
             }
@@ -879,7 +883,7 @@ impl App {
     pub fn request_restart(&mut self, key: ProcKey, port: u16) {
         let root_key = match self.restart_target(key) {
             Ok(k) => k,
-            Err(reason) => return self.toast(format!("Não dá para reiniciar: {reason}"), ToastKind::Error, false),
+            Err(reason) => return self.toast(format!("Não dá para reiniciar: {reason}"), ToastKind::Error),
         };
         let Some(snap) = self.snap.clone() else { return };
         let Some(root) = snap.find(root_key) else { return };
@@ -1006,12 +1010,18 @@ impl App {
     pub fn close_connection(&mut self, c: &ports::Connection) {
         match ports::close_connection(c) {
             Ok(()) => {
-                self.toast(format!("Conexão com {} fechada", c.remote), ToastKind::Ok, false);
+                self.toast(format!("Conexão com {} fechada", c.remote), ToastKind::Ok);
                 self.sampler.refresh_now();
             }
             Err(e) => {
-                let denied = e == "acesso negado";
-                self.toast(format!("Não fechou a conexão com {}: {e}", c.remote), ToastKind::Error, denied && !self.elevated);
+                let text = format!("Não fechou a conexão com {}: {e}", c.remote);
+                let task = elevate::Task::CloseConnection { local: c.local, remote: c.remote };
+                let retry = (e == "acesso negado").then(|| elevate::Request {
+                    task,
+                    success: format!("Conexão com {} fechada", c.remote),
+                    then: None,
+                });
+                self.toast_denied(text, retry);
             }
         }
     }
@@ -1022,10 +1032,10 @@ impl App {
         match dir {
             Some(dir) => {
                 if let Err(e) = platform::open_terminal(&dir) {
-                    self.toast(format!("Não abriu o terminal: {e}"), ToastKind::Error, false);
+                    self.toast(format!("Não abriu o terminal: {e}"), ToastKind::Error);
                 }
             }
-            None => self.toast("Sem acesso à pasta do processo. Execute como administrador.".to_owned(), ToastKind::Error, false),
+            None => self.toast("Sem acesso à pasta do processo. Execute como administrador.".to_owned(), ToastKind::Error),
         }
     }
 
@@ -1047,23 +1057,26 @@ impl App {
         let label = proc.display_name().to_owned();
         // O estado vem da coleta (as threads do processo), então vale também para quem
         // foi suspenso por outro programa. Coleta já para a tela refletir a mudança.
+        let target = elevate::Target { key, exe: proc.name.clone() };
         if proc.suspended {
+            let done = format!("{label} retomado");
             match control::resume(key, &proc.name) {
-                Ok(()) | Err(KillError::NotFound) => self.toast(format!("{label} retomado"), ToastKind::Ok, false),
-                Err(e) => self.control_error(&format!("Não retomou {label}"), e),
+                Ok(()) | Err(KillError::NotFound) => self.toast(done, ToastKind::Ok),
+                Err(e) => self.control_error(&format!("Não retomou {label}"), e, elevate::Task::Resume(target), done),
             }
         } else {
+            let done = format!("{label} suspenso até você retomar");
             match control::suspend(key, &proc.name) {
-                Ok(()) => self.toast(format!("{label} suspenso até você retomar"), ToastKind::Ok, false),
-                Err(e) => self.control_error(&format!("Não suspendeu {label}"), e),
+                Ok(()) => self.toast(done, ToastKind::Ok),
+                Err(e) => self.control_error(&format!("Não suspendeu {label}"), e, elevate::Task::Suspend(target), done),
             }
         }
         self.sampler.refresh_now();
     }
 
-    fn control_error(&mut self, what: &str, e: KillError) {
-        let denied = e == KillError::AccessDenied;
-        self.toast(format!("{what}: {}", e.describe()), ToastKind::Error, denied && !self.elevated);
+    fn control_error(&mut self, what: &str, e: KillError, task: elevate::Task, success: String) {
+        let retry = (e == KillError::AccessDenied).then_some(elevate::Request { task, success, then: None });
+        self.toast_denied(format!("{what}: {}", e.describe()), retry);
     }
 
     /// Prioridade, núcleos e modo eficiência. Lidos uma vez por seleção (abre um handle)
@@ -1078,13 +1091,15 @@ impl App {
     /// Aplica um ajuste e relê o estado do processo; erro vira aviso.
     pub fn tune(&mut self, key: ProcKey, change: Tune) {
         let Some(proc) = self.snap.as_ref().and_then(|s| s.find(key)).cloned() else { return };
-        let result = match change {
-            Tune::Priority(p) => control::set_priority(key, &proc.name, p),
-            Tune::Affinity(mask) => control::set_affinity(key, &proc.name, mask),
-            Tune::Efficiency(on) => control::set_efficiency(key, &proc.name, on),
+        let target = elevate::Target { key, exe: proc.name.clone() };
+        let (result, task) = match change {
+            Tune::Priority(p) => (control::set_priority(key, &proc.name, p), elevate::Task::Priority(target, p)),
+            Tune::Affinity(mask) => (control::set_affinity(key, &proc.name, mask), elevate::Task::Affinity(target, mask)),
+            Tune::Efficiency(on) => (control::set_efficiency(key, &proc.name, on), elevate::Task::Efficiency(target, on)),
         };
         if let Err(e) = result {
-            self.control_error(&format!("Não alterou {}", proc.display_name()), e);
+            let label = proc.display_name().to_owned();
+            self.control_error(&format!("Não alterou {label}"), e, task, format!("{label} alterado"));
         }
         self.tuning = None;
     }
@@ -1119,7 +1134,7 @@ impl App {
         list.push(rule);
         list.sort_by(|a, b| a.exe.cmp(&b.exe));
         self.set_rules(list);
-        self.toast(format!("{} vai abrir sempre com esses ajustes", proc.display_name()), ToastKind::Ok, false);
+        self.toast(format!("{} vai abrir sempre com esses ajustes", proc.display_name()), ToastKind::Ok);
     }
 
     pub fn forget_rule(&mut self, exe: &str) {
@@ -1137,10 +1152,10 @@ impl App {
         match export::save(stem, key.pid, &csv) {
             Ok(path) => {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                self.toast(format!("Histórico salvo em Downloads: {name}"), ToastKind::Ok, false);
+                self.toast(format!("Histórico salvo em Downloads: {name}"), ToastKind::Ok);
                 platform::open_in_explorer(&path);
             }
-            Err(e) => self.toast(format!("Não exportou o histórico: {e}"), ToastKind::Error, false),
+            Err(e) => self.toast(format!("Não exportou o histórico: {e}"), ToastKind::Error),
         }
     }
 
@@ -1155,18 +1170,24 @@ impl App {
         let total = request.targets.len();
         let mut done = 0;
         let mut errors: Vec<(String, KillError)> = Vec::new();
+        let mut denied: Vec<elevate::Target> = Vec::new();
         for target in &request.targets {
             match platform::kill(target.key.pid, target.key.start, &target.exe) {
                 Ok(()) => done += 1,
                 // Numa árvore, o filho pode ter morrido junto com outro antes da vez dele.
                 Err(KillError::NotFound) => done += 1,
-                Err(e) => errors.push((target.label.clone(), e)),
+                Err(e) => {
+                    if e == KillError::AccessDenied {
+                        denied.push(elevate::Target { key: target.key, exe: target.exe.clone() });
+                    }
+                    errors.push((target.label.clone(), e));
+                }
             }
         }
         if errors.is_empty()
             && let Some(relaunch) = request.then.clone()
         {
-            self.toast(format!("Reiniciando {}…", relaunch.title), ToastKind::Ok, false);
+            self.toast(format!("Reiniciando {}…", relaunch.title), ToastKind::Ok);
             self.relaunch(relaunch);
         } else if errors.is_empty() {
             let text = if total == 1 {
@@ -1174,16 +1195,20 @@ impl App {
             } else {
                 format!("{done} processos finalizados")
             };
-            self.toast(text, ToastKind::Ok, false);
+            self.toast(text, ToastKind::Ok);
         } else {
-            let denied = errors.iter().any(|(_, e)| *e == KillError::AccessDenied);
             let (name, first) = &errors[0];
             let text = if total == 1 {
                 format!("Não foi possível finalizar {name}: {}", first.describe())
             } else {
                 format!("{done} de {total} finalizados. {name}: {}", first.describe())
             };
-            self.toast(text, ToastKind::Error, denied && !self.elevated);
+            let retry = (!denied.is_empty()).then(|| elevate::Request {
+                success: if total == 1 { format!("{} finalizado", request.targets[0].label) } else { format!("{total} processos finalizados") },
+                task: elevate::Task::Kill(denied),
+                then: request.then.clone(),
+            });
+            self.toast_denied(text, retry);
         }
         if done > 0 {
             if let Some(sel) = self.selected
@@ -1199,18 +1224,65 @@ impl App {
         }
     }
 
-    pub fn toast(&mut self, text: String, kind: ToastKind, offer_elevation: bool) {
-        let secs = if offer_elevation { 8 } else { 4 };
-        self.toasts.push(Toast { text, kind, offer_elevation, until: Instant::now() + Duration::from_secs(secs) });
+    pub fn toast(&mut self, text: String, kind: ToastKind) {
+        self.push_toast(Toast { text, kind, elevate: None, until: Instant::now() + Duration::from_secs(4) });
+    }
+
+    /// Erro que, com "acesso negado", oferece repetir só aquela ação como administrador.
+    /// Já elevado não oferece: não haveria o que ganhar.
+    pub fn toast_denied(&mut self, text: String, retry: Option<elevate::Request>) {
+        let elevate = retry.filter(|_| !self.elevated);
+        let secs = if elevate.is_some() { 10 } else { 4 };
+        self.push_toast(Toast { text, kind: ToastKind::Error, elevate, until: Instant::now() + Duration::from_secs(secs) });
+    }
+
+    fn push_toast(&mut self, toast: Toast) {
+        self.toasts.push(toast);
         if self.toasts.len() > 3 {
             self.toasts.remove(0);
+        }
+    }
+
+    /// Resultado das ações repetidas como administrador.
+    fn elevation_logic(&mut self) {
+        for (request, result) in self.elevator.take() {
+            match result {
+                Ok(0) => {
+                    self.toast(request.success.clone(), ToastKind::Ok);
+                    if let Some(relaunch) = request.then.clone() {
+                        self.relaunch(relaunch);
+                    }
+                }
+                Ok(failed) => {
+                    let text = match &request.task {
+                        elevate::Task::Kill(targets) if targets.len() > 1 => {
+                            format!("{failed} de {} não finalizaram, nem como administrador", targets.len())
+                        }
+                        _ => "Não deu certo nem como administrador: o Windows protege esse processo".to_owned(),
+                    };
+                    self.toast(text, ToastKind::Error);
+                }
+                Err(e) => self.toast(format!("Nada foi feito: {e}"), ToastKind::Error),
+            }
+            match request.task {
+                elevate::Task::Service { .. } => {
+                    if let Some(manager) = &self.services {
+                        manager.refresh();
+                    }
+                }
+                elevate::Task::Startup { .. } => self.startup.reload(),
+                _ => {
+                    self.tuning = None;
+                    self.sampler.refresh_now();
+                }
+            }
         }
     }
 
     pub fn relaunch_elevated(&mut self, ctx: &egui::Context) {
         match platform::relaunch_as_admin() {
             Ok(()) => self.quit(ctx),
-            Err(e) => self.toast(format!("Não reiniciou como administrador: {e}"), ToastKind::Error, false),
+            Err(e) => self.toast(format!("Não reiniciou como administrador: {e}"), ToastKind::Error),
         }
     }
 
@@ -1236,8 +1308,8 @@ impl App {
         self.container_info = self.containers.latest();
         for (name, result) in self.containers.take_stopped() {
             match result {
-                Ok(()) => self.toast(format!("Container {name} parado"), ToastKind::Ok, false),
-                Err(e) => self.toast(format!("Não parou o container {name}: {e}"), ToastKind::Error, false),
+                Ok(()) => self.toast(format!("Container {name} parado"), ToastKind::Ok),
+                Err(e) => self.toast(format!("Não parou o container {name}: {e}"), ToastKind::Error),
             }
         }
     }
@@ -1250,13 +1322,17 @@ impl App {
         }
         let Some(manager) = &mut self.services else { return };
         manager.set_active(visible);
-        for (display, action, result) in manager.take_outcomes() {
+        for (name, display, action, result) in manager.take_outcomes() {
             match result {
-                Ok(()) => self.toast(format!("{display} {}", action.done()), ToastKind::Ok, false),
+                Ok(()) => self.toast(format!("{display} {}", action.done()), ToastKind::Ok),
                 Err(e) => {
-                    let denied = e == services::Error::AccessDenied;
                     let text = format!("Não deu para {} {display}: {}", action.verb(), e.describe());
-                    self.toast(text, ToastKind::Error, denied && !self.elevated);
+                    let retry = (e == services::Error::AccessDenied).then(|| elevate::Request {
+                        task: elevate::Task::Service { name, action },
+                        success: format!("{display} {}", action.done()),
+                        then: None,
+                    });
+                    self.toast_denied(text, retry);
                 }
             }
         }
@@ -1326,7 +1402,7 @@ impl App {
         if self.toasts.is_empty() && ready.is_none() {
             return;
         }
-        let mut elevate = false;
+        let mut elevate: Option<usize> = None;
         let mut dismiss: Option<usize> = None;
         let mut update: Option<bool> = None;
         egui::Area::new(Id::new("toasts"))
@@ -1353,10 +1429,13 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(glyph).font(theme::regular(16.0)).color(color));
                                 ui.add(egui::Label::new(RichText::new(&toast.text).color(INK).font(theme::regular(13.0))).wrap());
-                                if toast.offer_elevation
-                                    && ui.button(RichText::new(format!("{} Executar como admin", icon::SHIELD_CHECK))).clicked()
+                                if toast.elevate.is_some()
+                                    && ui
+                                        .button(RichText::new(format!("{} Tentar como admin", icon::SHIELD_CHECK)))
+                                        .on_hover_text("Repete só esta ação como administrador (pede o UAC). O app continua como está.")
+                                        .clicked()
                                 {
-                                    elevate = true;
+                                    elevate = Some(i);
                                 }
                                 if widgets::icon_button(ui, icon::X, "Fechar").clicked() {
                                     dismiss = Some(i);
@@ -1368,9 +1447,11 @@ impl App {
             });
         if let Some(i) = dismiss {
             self.toasts.remove(i);
-        }
-        if elevate {
-            self.relaunch_elevated(ctx);
+        } else if let Some(i) = elevate {
+            let toast = self.toasts.remove(i);
+            if let Some(request) = toast.elevate {
+                self.elevator.run(ctx, request);
+            }
         }
         match update {
             Some(true) => self.install_update(ctx),
@@ -1421,11 +1502,12 @@ impl eframe::App for App {
         self.icons.poll(ctx);
         while let Ok(result) = self.relaunch_rx.try_recv() {
             match result {
-                Ok(title) => self.toast(format!("{title} reaberto numa janela de terminal"), ToastKind::Ok, false),
-                Err(e) => self.toast(format!("Não reabriu o servidor: {e}"), ToastKind::Error, false),
+                Ok(title) => self.toast(format!("{title} reaberto numa janela de terminal"), ToastKind::Ok),
+                Err(e) => self.toast(format!("Não reabriu o servidor: {e}"), ToastKind::Error),
             }
         }
         self.services_logic(ctx);
+        self.elevation_logic();
         self.containers_logic();
         if self.view == View::Startup {
             self.startup.ensure_loaded();

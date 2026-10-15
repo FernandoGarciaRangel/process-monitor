@@ -132,7 +132,12 @@ fn entry(name: String, command: String, source: Source, exe: Option<PathBuf>) ->
 
 /// Liga ou desliga, como o Gerenciador de Tarefas: 02 ligado, 03 desligado, e a hora.
 pub fn set_enabled(entry: &Entry, on: bool) -> Result<(), Error> {
-    let (root, key) = entry.source.approved();
+    set_enabled_raw(entry.source, &entry.name, on)
+}
+
+/// O mesmo, só com o que a cópia elevada recebe pela linha de comando.
+pub fn set_enabled_raw(source: Source, name: &str, on: bool) -> Result<(), Error> {
+    let (root, key) = source.approved();
     let mut data = [0u8; 12];
     data[0] = if on { 2 } else { 3 };
     if !on {
@@ -144,7 +149,7 @@ pub fn set_enabled(entry: &Entry, on: bool) -> Result<(), Error> {
         RegSetKeyValueW(
             root,
             &HSTRING::from(key),
-            &HSTRING::from(entry.name.as_str()),
+            &HSTRING::from(name),
             REG_BINARY.0,
             Some(data.as_ptr().cast()),
             data.len() as u32,

@@ -231,14 +231,19 @@ fn toggle(app: &mut App, index: usize, on: bool) {
                 e.enabled = on;
             }
             let text = if on { "vai abrir com o Windows" } else { "não abre mais com o Windows" };
-            app.toast(format!("{} {text}", entry.display_name()), ToastKind::Ok, false);
+            app.toast(format!("{} {text}", entry.display_name()), ToastKind::Ok);
         }
         Err(e) => {
             let denied = e == startup::Error::AccessDenied;
             let hint = if denied && entry.source.machine() { " (vale para todos os usuários)" } else { "" };
             let text = format!("Não alterou {}{hint}: {}", entry.display_name(), e.describe());
-            let elevate = denied && !app.elevated;
-            app.toast(text, ToastKind::Error, elevate);
+            let done = if on { "vai abrir com o Windows" } else { "não abre mais com o Windows" };
+            let retry = denied.then(|| crate::elevate::Request {
+                task: crate::elevate::Task::Startup { source: entry.source, name: entry.name.clone(), on },
+                success: format!("{} {done}", entry.display_name()),
+                then: None,
+            });
+            app.toast_denied(text, retry);
         }
     }
 }

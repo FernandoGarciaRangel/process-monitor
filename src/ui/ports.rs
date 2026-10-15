@@ -239,7 +239,7 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
             Action::StopContainer(name) => app.containers.stop(name),
             Action::Terminal(dir) => {
                 if let Err(e) = platform::open_terminal(&dir) {
-                    app.toast(format!("Não abriu o terminal: {e}"), crate::app::ToastKind::Error, false);
+                    app.toast(format!("Não abriu o terminal: {e}"), crate::app::ToastKind::Error);
                 }
             }
         }

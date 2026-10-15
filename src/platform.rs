@@ -157,6 +157,42 @@ pub fn is_elevated() -> bool {
     }
 }
 
+/// Roda este exe elevado (UAC) com `params` e espera ele sair. `Ok` com o código de
+/// saída; `Err` se o usuário recusou o UAC. `owner` é a janela dona do pedido (0 = nenhuma).
+pub fn run_elevated(params: &str, owner: isize) -> Result<u32, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = HSTRING::from(exe.as_os_str());
+    let params = HSTRING::from(params);
+    unsafe {
+        // O ShellExecuteEx pede COM na thread que o chama.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS,
+            hwnd: windows::Win32::Foundation::HWND(owner as *mut core::ffi::c_void),
+            lpVerb: w!("runas"),
+            lpFile: PCWSTR(exe.as_ptr()),
+            lpParameters: PCWSTR(params.as_ptr()),
+            nShow: SW_HIDE.0,
+            ..Default::default()
+        };
+        ShellExecuteExW(&mut info).map_err(|_| "você não autorizou".to_owned())?;
+        if info.hProcess.is_invalid() {
+            return Err("você não autorizou".to_owned());
+        }
+        let guard = HandleGuard(info.hProcess);
+        WaitForSingleObject(guard.0, windows::Win32::System::Threading::INFINITE);
+        let mut code = 0u32;
+        GetExitCodeProcess(guard.0, &mut code).map_err(|e| e.message())?;
+        Ok(code)
+    }
+}
+
+/// Janela em primeiro plano agora, para ser a dona do UAC.
+pub fn foreground_window() -> isize {
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as isize }
+}
+
 /// Abre uma nova instância elevada (UAC). `Ok` quando o usuário aceitou; o chamador
 /// fecha a instância atual. `--replace` faz a nova esperar esta sair, em vez de cair
 /// na instância única.

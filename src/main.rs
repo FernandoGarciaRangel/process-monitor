@@ -5,6 +5,7 @@ mod alerts;
 mod app;
 mod containers;
 mod control;
+mod elevate;
 mod export;
 mod format;
 mod gpu;
@@ -27,6 +28,11 @@ fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |flag: &str| args.iter().any(|a| a == flag);
 
+    // Ação pedida como administrador (`elevate`): faz só ela e sai, antes da instância
+    // única e sem abrir janela.
+    if let Some(code) = elevate::run_from_args(&args) {
+        std::process::exit(code);
+    }
     // Substituição do Gerenciador de Tarefas (antes da instância única, para não
     // colidir com ela). A instância elevada grava direto no HKLM e sai com código.
     if let Some(v) = args.iter().find_map(|a| a.strip_prefix("--set-taskmgr=")) {

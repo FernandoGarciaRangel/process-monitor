@@ -125,7 +125,8 @@ pub enum Error {
 }
 
 /// Resultado de uma ação, para o aviso na tela: nome de exibição e o que houve.
-pub type Outcome = (String, Action, Result<(), Error>);
+/// Vem também o nome interno, para repetir como administrador.
+pub type Outcome = (String, String, Action, Result<(), Error>);
 
 pub type Listing = Result<Vec<Service>, String>;
 
@@ -175,6 +176,11 @@ impl Manager {
         self.outcomes.try_iter().collect()
     }
 
+    /// Relê já (depois de uma ação feita como administrador, fora desta thread).
+    pub fn refresh(&self) {
+        let _ = self.tx.send(Msg::Refresh);
+    }
+
     pub fn act(&self, ctx: &egui::Context, name: String, display: String, action: Action) {
         let (out, tx, configs, ctx) = (self.outcome_tx.clone(), self.tx.clone(), self.configs.clone(), ctx.clone());
         std::thread::Builder::new()
@@ -186,7 +192,7 @@ impl Manager {
                 {
                     c.remove(&name);
                 }
-                let _ = out.send((display, action, result));
+                let _ = out.send((name, display, action, result));
                 let _ = tx.send(Msg::Refresh);
                 ctx.request_repaint();
             })
@@ -347,7 +353,7 @@ unsafe fn config2(service: &Handle, level: windows::Win32::System::Services::SER
     }
 }
 
-fn perform(name: &str, action: Action) -> Result<(), Error> {
+pub fn perform(name: &str, action: Action) -> Result<(), Error> {
     let access = match action {
         Action::Start => SERVICE_START | SERVICE_QUERY_STATUS,
         Action::Stop => SERVICE_STOP | SERVICE_QUERY_STATUS,
