@@ -330,6 +330,9 @@ mod tests {
     fn prioridade_afinidade_e_eficiencia() {
         let mut child = spawn_victim();
         let key = key_of(&child);
+        // O processo herda a prioridade de quem o abriu: no runner do GitHub Actions o
+        // job roda "abaixo do normal". Parte de Normal para não depender disso.
+        set_priority(key, "PING.EXE", Priority::Normal).unwrap();
         assert_eq!(read(key).priority, Some(Priority::Normal));
         set_priority(key, "PING.EXE", Priority::BelowNormal).unwrap();
         assert_eq!(read(key).priority, Some(Priority::BelowNormal));
