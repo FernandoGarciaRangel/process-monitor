@@ -1,6 +1,6 @@
 [package]
 name = "process-monitor"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "Monitor de processos e recursos do Windows"
 authors = ["Fernando Garcia"]
