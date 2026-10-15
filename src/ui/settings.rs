@@ -481,6 +481,16 @@ fn alerts_section(app: &mut App, ui: &mut Ui) {
                 }
             });
         });
+        divider(ui);
+        row(
+            ui,
+            "Travado ou reiniciando",
+            "Janela que não responde há 10 s, ou programa que fecha com erro e volta em loop.",
+            40.0,
+            |ui| {
+                widgets::toggle(ui, &mut config.problems_enabled);
+            },
+        );
     });
 
     ui.add_space(16.0);

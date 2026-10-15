@@ -500,6 +500,10 @@ impl App {
             if let Ok(mut slot) = last.lock() {
                 *slot = Some(alert.target);
             }
+            // No debug, o console do dev.ps1 mostra cada aviso: o balão some sozinho.
+            if cfg!(debug_assertions) {
+                eprintln!("[alerta] {} | {}", alert.title, alert.body);
+            }
             notifier.notify(&alert.title, &alert.body);
         }));
     }
@@ -1556,6 +1560,7 @@ const ALERT_CPU_PERCENT_KEY: &str = "alert_cpu_percent";
 const ALERT_CPU_SECS_KEY: &str = "alert_cpu_secs";
 const ALERT_MEMORY_ON_KEY: &str = "alert_memory_on";
 const ALERT_MEMORY_KEY: &str = "alert_memory_bytes";
+const ALERT_PROBLEMS_ON_KEY: &str = "alert_problems_on";
 const ALERT_DISK_ON_KEY: &str = "alert_disk_on";
 const ALERT_DISK_PERCENT_KEY: &str = "alert_disk_free_percent";
 
@@ -1574,6 +1579,7 @@ fn load_alert_config(stored: &dyn Fn(&str) -> Option<String>) -> alerts::Config 
         cpu_secs: stored(ALERT_CPU_SECS_KEY).and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(defaults.cpu_secs),
         memory_enabled: flag(ALERT_MEMORY_ON_KEY, defaults.memory_enabled),
         memory_bytes: stored(ALERT_MEMORY_KEY).and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(defaults.memory_bytes),
+        problems_enabled: flag(ALERT_PROBLEMS_ON_KEY, defaults.problems_enabled),
         disk_enabled: flag(ALERT_DISK_ON_KEY, defaults.disk_enabled),
         disk_free_percent: stored(ALERT_DISK_PERCENT_KEY)
             .and_then(|v| v.parse().ok())
@@ -1591,6 +1597,7 @@ fn save_alert_config(storage: &mut dyn eframe::Storage, c: &alerts::Config) {
     storage.set_string(ALERT_CPU_SECS_KEY, c.cpu_secs.to_string());
     storage.set_string(ALERT_MEMORY_ON_KEY, flag(c.memory_enabled));
     storage.set_string(ALERT_MEMORY_KEY, c.memory_bytes.to_string());
+    storage.set_string(ALERT_PROBLEMS_ON_KEY, flag(c.problems_enabled));
     storage.set_string(ALERT_DISK_ON_KEY, flag(c.disk_enabled));
     storage.set_string(ALERT_DISK_PERCENT_KEY, c.disk_free_percent.to_string());
 }

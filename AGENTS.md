@@ -196,6 +196,11 @@ para o clique no balão abrir o processo ou a porta.
 - Porta vigiada só "cai" depois de 3 s fora (reinício rápido não avisa) e só se já
   foi vista de pé. CPU e memória avisam uma vez por processo, com histerese.
 - O próprio Process Monitor nunca se denuncia.
+- Travado e em loop (`problems_enabled`) avisam pelo que o `health` marcou. O travado
+  avisa de novo só depois de voltar a responder. O loop avisa uma vez a cada 10 min por
+  programa, porque cada cópia nova tem outro PID.
+- O balão não deixa rastro (nem no histórico de notificações do Windows). No debug, cada
+  aviso sai no console do `dev.ps1` como `[alerta] título | texto`.
 
 ## Quem está usando um arquivo
 

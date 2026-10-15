@@ -297,6 +297,21 @@ mod tests {
         ProcKey { pid, start: sys.process(sysinfo::Pid::from_u32(pid)).unwrap().start_time() }
     }
 
+    /// A suspensão chega às threads de forma assíncrona: com a máquina ocupada (a suíte
+    /// inteira em paralelo), a primeira leitura logo depois ainda pode ver a thread rodando.
+    fn settles(buf: &mut Vec<u8>, pid: u32, suspended: bool) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            if suspended_pids(buf).contains(&pid) == suspended {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn suspende_e_retoma() {
         let mut child = spawn_victim();
@@ -304,9 +319,9 @@ mod tests {
         let mut buf = Vec::new();
         assert!(!suspended_pids(&mut buf).contains(&key.pid));
         assert_eq!(suspend(key, "PING.EXE"), Ok(()));
-        assert!(suspended_pids(&mut buf).contains(&key.pid), "suspenso por este app aparece na leitura do sistema");
+        assert!(settles(&mut buf, key.pid, true), "suspenso por este app aparece na leitura do sistema");
         assert_eq!(resume(key, "PING.EXE"), Ok(()));
-        assert!(!suspended_pids(&mut buf).contains(&key.pid));
+        assert!(settles(&mut buf, key.pid, false));
         // Hora de criação errada: o PID "é de outro processo".
         assert_eq!(suspend(ProcKey { pid: key.pid, start: key.start + 100 }, "PING.EXE"), Err(KillError::PidReused));
         let _ = child.kill();

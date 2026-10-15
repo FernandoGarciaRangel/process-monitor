@@ -1,11 +1,13 @@
 //! Alertas: porta vigiada que caiu ou voltou, processo com CPU alta por um tempo,
-//! processo com memória alta e disco quase cheio. A avaliação roda na thread da coleta, que continua viva
+//! processo com memória alta, processo travado ou reiniciando em loop e disco quase cheio. A avaliação roda na thread da coleta, que continua viva
 //! com a janela escondida na bandeja; aqui fica só a regra, sem chamada de sistema.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::format;
+use crate::health::Problem;
 use crate::ports::Listener;
 use crate::sampler::{DiskInfo, ProcInfo, ProcKey};
 
@@ -17,6 +19,9 @@ const CPU_RESET: f32 = 0.8;
 const MEMORY_RESET: f64 = 0.9;
 /// O disco só avisa de novo depois de liberar esses pontos percentuais acima do limite.
 const DISK_RESET_POINTS: f32 = 5.0;
+/// Um programa em loop avisa no máximo uma vez nesse tempo: cada cópia nova tem outro
+/// PID, e sem isso o aviso viria a cada reinício.
+const RESTART_QUIET: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -28,6 +33,8 @@ pub struct Config {
     pub cpu_secs: u64,
     pub memory_enabled: bool,
     pub memory_bytes: u64,
+    /// Não respondendo e reiniciando em loop (`health`).
+    pub problems_enabled: bool,
     pub disk_enabled: bool,
     /// Avisa quando o espaço livre de uma unidade cai abaixo desta porcentagem.
     pub disk_free_percent: f32,
@@ -43,6 +50,7 @@ impl Default for Config {
             cpu_secs: 30,
             memory_enabled: true,
             memory_bytes: 4 * 1024 * 1024 * 1024,
+            problems_enabled: true,
             disk_enabled: true,
             disk_free_percent: 10.0,
         }
@@ -70,6 +78,10 @@ pub struct Alerts {
     cpu_since: HashMap<ProcKey, Instant>,
     cpu_alerted: HashSet<ProcKey>,
     memory_alerted: HashSet<ProcKey>,
+    /// Travados que já avisaram: avisam de novo só depois de voltar a responder.
+    hung_alerted: HashSet<ProcKey>,
+    /// Programas em loop (executável e linha de comando) e quando avisaram.
+    restart_alerted: HashMap<(String, String), Instant>,
     /// Portas vigiadas que já foram vistas abertas, com o nome de quem escutava.
     port_owner: HashMap<u16, String>,
     port_missing_since: HashMap<u16, Instant>,
@@ -95,6 +107,8 @@ impl Alerts {
         self.cpu_since.retain(|k, _| alive.contains(k));
         self.cpu_alerted.retain(|k| alive.contains(k));
         self.memory_alerted.retain(|k| alive.contains(k));
+        self.hung_alerted.retain(|k| alive.contains(k));
+        self.restart_alerted.retain(|_, at| now.duration_since(*at) < RESTART_QUIET);
         // Desligado, ninguém atualiza a contagem: ao religar ela recomeça do zero, sem
         // avisar na hora de um pico que começou com o alerta desligado.
         if !config.cpu_enabled {
@@ -146,6 +160,23 @@ impl Alerts {
                 } else if (p.memory as f64) < config.memory_bytes as f64 * MEMORY_RESET {
                     self.memory_alerted.remove(&key);
                 }
+            }
+            let hung = p.problems.iter().find(|x| matches!(x, Problem::NotResponding { .. }));
+            match hung {
+                Some(problem) if config.problems_enabled && self.hung_alerted.insert(key) => {
+                    out.push(problem_alert(p, *problem, format!("Não respondendo: {}", p.display_name())));
+                }
+                Some(_) => {}
+                None => {
+                    self.hung_alerted.remove(&key);
+                }
+            }
+            if config.problems_enabled
+                && let Some(problem) = p.problems.iter().find(|x| matches!(x, Problem::Restarting { .. }))
+                && let Entry::Vacant(e) = self.restart_alerted.entry((p.name.clone(), p.cmd.clone()))
+            {
+                e.insert(now);
+                out.push(problem_alert(p, *problem, format!("Reiniciando em loop: {}", p.display_name())));
             }
         }
 
@@ -216,6 +247,14 @@ impl Alerts {
             self.disk_alerted.clear();
         }
         out
+    }
+}
+
+fn problem_alert(p: &ProcInfo, problem: Problem, title: String) -> Alert {
+    Alert {
+        title,
+        body: format!("{} ({}, PID {}). {}", p.display_name(), p.name, p.pid, problem.detail()),
+        target: Target::Process(p.key()),
     }
 }
 
@@ -308,6 +347,40 @@ mod tests {
         alerts.evaluate(t, std::slice::from_ref(&p), &[], &[], &config, ME);
         p.memory = 1500;
         assert_eq!(alerts.evaluate(t, std::slice::from_ref(&p), &[], &[], &config, ME).len(), 1);
+    }
+
+    #[test]
+    fn travado_e_em_loop_avisam_uma_vez() {
+        let config = Config { cpu_enabled: false, memory_enabled: false, ports_enabled: false, ..Config::default() };
+        let mut alerts = Alerts::default();
+        let t = Instant::now();
+        let at = |s: u64| t + Duration::from_secs(s);
+        let mut app = proc(10, Some(1), 100, "app.exe");
+        app.problems = vec![Problem::NotResponding { secs: 12 }];
+        let fired = alerts.evaluate(at(0), std::slice::from_ref(&app), &[], &[], &config, ME);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].title, "Não respondendo: app.exe");
+        assert!(alerts.evaluate(at(1), std::slice::from_ref(&app), &[], &[], &config, ME).is_empty());
+        // Voltou a responder e travou de novo: avisa de novo.
+        app.problems.clear();
+        alerts.evaluate(at(2), std::slice::from_ref(&app), &[], &[], &config, ME);
+        app.problems = vec![Problem::NotResponding { secs: 10 }];
+        assert_eq!(alerts.evaluate(at(3), std::slice::from_ref(&app), &[], &[], &config, ME).len(), 1);
+
+        // Em loop: cada cópia tem outro PID, mas o programa avisa uma vez em 10 min.
+        let copy = |pid: u32| {
+            let mut p = proc(pid, Some(1), 100 + u64::from(pid), "node.exe");
+            p.cmd = "node server.js".to_owned();
+            p.problems = vec![Problem::Restarting { exits: 3 }];
+            p
+        };
+        assert_eq!(alerts.evaluate(at(10), &[copy(20)], &[], &[], &config, ME).len(), 1);
+        assert!(alerts.evaluate(at(20), &[copy(21)], &[], &[], &config, ME).is_empty());
+        assert_eq!(alerts.evaluate(at(10 + 601), &[copy(22)], &[], &[], &config, ME).len(), 1);
+
+        // Desligado, nada.
+        let off = Config { problems_enabled: false, ..config };
+        assert!(Alerts::default().evaluate(at(0), &[copy(30)], &[], &[], &off, ME).is_empty());
     }
 
     #[test]
