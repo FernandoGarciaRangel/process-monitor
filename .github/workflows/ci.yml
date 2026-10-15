@@ -1,0 +1,36 @@
+# Clippy e testes a cada push e PR. Só Windows: o app usa Win32 direto.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Um push novo no mesmo branch cancela a execução anterior.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Os testes criam e finalizam processos reais (ping, cmd). Os que dependem
+      # desta máquina ou da rede ficam marcados com #[ignore].
+      - name: Testes
+        run: cargo test

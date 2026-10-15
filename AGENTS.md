@@ -31,6 +31,12 @@ O rustup instala em `~\.cargo\bin`, que não está no PATH de terminais abertos 
 da instalação. Os scripts acrescentam o caminho sozinhos; em comandos avulsos, use
 `$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"`.
 
+## CI
+
+`.github/workflows/ci.yml` roda o clippy e o `cargo test` em `windows-latest` a cada
+push e PR no `main`. O runner é Windows em inglês: teste que dependa de algo desta
+máquina (GPU, bateria, rede, registro do usuário) vai com `#[ignore]`.
+
 ## 🔴 App aberto trava o build e o instalador
 
 - Com o app rodando de `target\release`, o `cargo build --release` não sobrescreve o exe.
