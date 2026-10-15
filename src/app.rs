@@ -346,6 +346,8 @@ pub struct App {
     pub service_search: String,
     /// Servidores sem terminal que o usuário já viu e mandou esquecer (nesta execução).
     pub orphans_dismissed: HashSet<ProcKey>,
+    /// Processos com problema cujo aviso o usuário dispensou nesta execução.
+    pub problems_dismissed: HashSet<ProcKey>,
     /// Regras por programa, aplicadas pela thread da coleta.
     pub rules: Vec<rules::Rule>,
     pub selected_service: Option<String>,
@@ -475,6 +477,7 @@ impl App {
             services: None,
             service_search: String::new(),
             orphans_dismissed: HashSet::new(),
+            problems_dismissed: HashSet::new(),
             rules: stored(RULES_KEY).map(|v| rules::parse(&v)).unwrap_or_default(),
             selected_service: None,
             startup: ui::startup::State::new(cc.egui_ctx.clone()),

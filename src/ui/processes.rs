@@ -9,6 +9,7 @@ use egui_phosphor::regular as icon;
 
 use crate::app::{App, SortKey};
 use crate::format;
+use crate::health::Problem;
 use crate::sampler::{ProcInfo, ProcKey, Snapshot};
 use crate::theme::{self, HAIRLINE, INK, INK_2, INK_3, INK_4, R_SM};
 use crate::ui::columns::{self, TableCol};
@@ -129,7 +130,9 @@ enum Action {
     Terminal(ProcKey),
     KillOrphans(Vec<ProcKey>),
     DismissOrphans(Vec<ProcKey>),
-    ShowOrphans(Vec<ProcKey>),
+    DismissProblems(Vec<ProcKey>),
+    /// Filtra a lista por estes processos (busca pelos PIDs).
+    Show(Vec<ProcKey>),
 }
 
 pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
@@ -158,6 +161,7 @@ pub fn show(app: &mut App, ui: &mut Ui, snap: &Snapshot) {
         crate::ports::orphan_servers(&snap.processes, &snap.listeners, |c| snap.parent_of(c)).iter().map(|p| p.key()).collect();
     let mut actions: Vec<Action> = Vec::new();
     orphans_banner(app, ui, snap, &orphans, &mut actions);
+    problems_banner(app, ui, snap, &mut actions);
 
     keyboard(app, ui, &rows);
 
@@ -276,7 +280,8 @@ fn apply(app: &mut App, ui: &mut Ui, snap: &Snapshot, actions: Vec<Action>) {
             }
             Action::KillOrphans(keys) => app.request_kill_orphans(&keys),
             Action::DismissOrphans(keys) => app.orphans_dismissed.extend(keys),
-            Action::ShowOrphans(keys) => {
+            Action::DismissProblems(keys) => app.problems_dismissed.extend(keys),
+            Action::Show(keys) => {
                 app.search = keys.iter().map(|k| k.pid.to_string()).collect::<Vec<_>>().join(", ");
             }
         }
@@ -403,6 +408,9 @@ fn proc_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, p: &ProcInfo, depth: u
                 pill(ui, &format!("{}  sem terminal", icon::LINK_BREAK), theme::ACCENT)
                     .on_hover_text("O terminal ou o editor que abriu este servidor já fechou, e ele continua rodando.");
             }
+            for problem in &p.problems {
+                problem_pill(ui, *problem);
+            }
             name_label(ui, p.display_name(), p.exe_hint(), theme::regular(13.0));
         }
         Col::Pid => widgets::right_text(ui, &p.pid.to_string(), INK_3),
@@ -432,6 +440,17 @@ fn group_cell(app: &mut App, ui: &mut Ui, snap: &Snapshot, g: &Group, col: Col) 
             ui.add_space(4.0);
             count_pill(ui, g.members.len());
             ui.add_space(2.0);
+            let troubled: Vec<&ProcInfo> = g.members.iter().copied().filter(|p| !p.problems.is_empty()).collect();
+            if !troubled.is_empty() {
+                let severe = troubled.iter().any(|p| p.problems.iter().any(|x| x.severe()));
+                let color = if severe { theme::DANGER } else { theme::ACCENT };
+                let n = troubled.len();
+                ui.label(RichText::new(icon::WARNING).font(theme::regular(13.0)).color(color)).on_hover_text(if n == 1 {
+                    "1 processo do grupo com problema".to_owned()
+                } else {
+                    format!("{n} processos do grupo com problema")
+                });
+            }
             name_label(ui, first.display_name(), first.exe_hint(), theme::semibold(13.0));
         }
         Col::Pid | Col::User => {}
@@ -466,6 +485,56 @@ fn pill(ui: &mut Ui, text: &str, color: egui::Color32) -> egui::Response {
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     ui.add_space(2.0);
     response
+}
+
+/// Marca de problema antes do nome: carmim para travado e loop, laranja para memória.
+pub(super) fn problem_pill(ui: &mut Ui, problem: Problem) {
+    let glyph = match problem {
+        Problem::NotResponding { .. } => icon::HOURGLASS_HIGH,
+        Problem::Restarting { .. } => icon::ARROWS_CLOCKWISE,
+        Problem::MemoryGrowing { .. } => icon::TREND_UP,
+    };
+    let color = if problem.severe() { theme::DANGER } else { theme::ACCENT };
+    pill(ui, &format!("{glyph}  {}", problem.label()), color).on_hover_text(problem.detail());
+}
+
+/// Aviso dos processos com problema (`health`). Some quando o problema passa ou quando
+/// o usuário dispensa (só nesta execução).
+fn problems_banner(app: &App, ui: &mut Ui, snap: &Snapshot, actions: &mut Vec<Action>) {
+    let mut troubled: Vec<&ProcInfo> =
+        snap.processes.iter().filter(|p| !p.problems.is_empty() && !app.problems_dismissed.contains(&p.key())).collect();
+    if troubled.is_empty() {
+        return;
+    }
+    // Os graves primeiro; entre eles, o mais antigo.
+    troubled.sort_by_key(|p| (!p.problems.iter().any(|x| x.severe()), p.start_time));
+    let keys: Vec<ProcKey> = troubled.iter().map(|p| p.key()).collect();
+    let severe = troubled.iter().any(|p| p.problems.iter().any(|x| x.severe()));
+    let names: Vec<String> =
+        troubled.iter().map(|p| format!("{} ({})", p.display_name(), p.problems[0].label())).collect();
+    let shown = names.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    let more = if names.len() > 3 { format!(" e mais {}", names.len() - 3) } else { String::new() };
+    let n = keys.len();
+    let text = if n == 1 { format!("1 processo com problema: {shown}.") } else { format!("{n} processos com problema: {shown}{more}.") };
+    widgets::card().inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let color = if severe { theme::DANGER } else { theme::ACCENT };
+            ui.label(RichText::new(icon::WARNING).font(theme::regular(16.0)).color(color));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::icon_button(ui, icon::X, "Dispensar até reabrir o app").clicked() {
+                    actions.push(Action::DismissProblems(keys.clone()));
+                }
+                if widgets::ghost_button(ui, "Ver").on_hover_text("Filtrar a lista por eles").clicked() {
+                    actions.push(Action::Show(keys.clone()));
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(text).font(theme::regular(12.5)).color(INK_2)).wrap());
+                });
+            });
+        });
+    });
+    ui.add_space(10.0);
 }
 
 /// Aviso dos servidores de desenvolvimento que ficaram sem terminal. Some quando eles
@@ -509,7 +578,7 @@ fn orphans_banner(app: &App, ui: &mut Ui, snap: &Snapshot, orphans: &HashSet<Pro
                     actions.push(Action::KillOrphans(keys.clone()));
                 }
                 if widgets::ghost_button(ui, "Ver").on_hover_text("Filtrar a lista por eles").clicked() {
-                    actions.push(Action::ShowOrphans(keys.clone()));
+                    actions.push(Action::Show(keys.clone()));
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add(egui::Label::new(RichText::new(text).font(theme::regular(12.5)).color(INK_2)).wrap());

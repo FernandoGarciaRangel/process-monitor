@@ -110,6 +110,8 @@ pub struct ProcInfo {
     pub gpu: f32,
     /// Todas as threads suspensas (por este app, por outro ou pelo Windows).
     pub suspended: bool,
+    /// Não respondendo, reiniciando em loop ou memória crescendo (`health`).
+    pub problems: Vec<crate::health::Problem>,
 }
 
 impl ProcInfo {
@@ -403,6 +405,7 @@ fn run(
     let mut alert_config = alerts::Config::default();
     let mut alert_sink: Option<AlertSink> = None;
     let mut rules = crate::rules::Applier::default();
+    let mut health = crate::health::Health::default();
     // Buffer da leitura de threads, reaproveitado: tem centenas de KB.
     let mut threads_buf: Vec<u8> = Vec::new();
     let own_pid = std::process::id();
@@ -436,7 +439,7 @@ fn run(
         let cores: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
         let cpu = sys.global_cpu_usage();
 
-        let processes: Vec<ProcInfo> = sys
+        let mut processes: Vec<ProcInfo> = sys
             .processes()
             .values()
             .map(|p| {
@@ -471,9 +474,11 @@ fn run(
                     disk_total_written: disk.total_written_bytes,
                     gpu: gpu_sample.per_process.get(&p.pid().as_u32()).copied().unwrap_or(0.0),
                     suspended: suspended.contains(&p.pid().as_u32()),
+                    problems: Vec::new(),
                 }
             })
             .collect();
+        health.update(Instant::now(), &mut processes, own_pid);
 
         let disk_list: Vec<DiskInfo> = disks
             .list()
@@ -712,6 +717,7 @@ pub(crate) mod tests {
             disk_total_written: 0,
             gpu: 0.0,
             suspended: false,
+            problems: Vec::new(),
         }
     }
 

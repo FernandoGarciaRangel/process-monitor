@@ -233,6 +233,17 @@ criação; case com a coleta pelos dois (±2 s), nunca só pelo PID.
 - Servidores sem terminal (`ports::orphan_servers`): de desenvolvimento, com o pai morto
   e alguma porta em escuta na árvore. Sem a exigência da porta, qualquer script Python ou
   Node solto que ficou sem pai entrava no aviso.
+- Processos com problema (`src/health.rs`), avaliados pela thread da coleta e marcados
+  em `ProcInfo.problems`:
+  - **Não respondendo**: `IsHungAppWindow` só em janelas **visíveis**. As ocultas
+    ("Default IME") de muitos processos sadios também se dizem travadas. A janela
+    fantasma (classe `Ghost`) é do `dwm.exe` e fica de fora. Conta depois de mais 5 s.
+  - **Reiniciando**: handle aberto em cada processo novo para ler o código de saída.
+    Conta saída com erro (nem 0 nem Ctrl+C) de quem viveu 3 s ou mais e tinha o pai vivo,
+    agrupando por executável, linha de comando e pai. Sem o pai na chave, todos os
+    `conhost.exe 0x4` do sistema viravam "reiniciando" quando um `cmd` caía.
+  - **Memória crescendo**: memória privada (a `virtual_memory` do sysinfo; o working set
+    é aparado quando falta RAM), um ponto a cada 30 s, só depois de 2 min de vida.
 - Fechar conexão (`ports::close_connection`, `SetTcpEntry`) só existe para IPv4 e pede
   administrador; nas conexões IPv6 o botão nem aparece.
 - "Liberar porta" de um servidor de desenvolvimento finaliza a árvore desde

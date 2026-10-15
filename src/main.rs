@@ -8,6 +8,7 @@ mod control;
 mod export;
 mod format;
 mod gpu;
+mod health;
 mod icons;
 mod locks;
 mod platform;

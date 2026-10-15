@@ -653,6 +653,58 @@ pub(crate) fn open_error(e: windows::core::Error) -> KillError {
     }
 }
 
+/// PIDs com alguma janela visível que o Windows considera travada: 5 s sem processar
+/// mensagens, o mesmo critério do "Não respondendo" do Gerenciador de Tarefas.
+pub fn hung_pids() -> std::collections::HashSet<u32> {
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowThreadProcessId, IsHungAppWindow, IsWindowVisible,
+    };
+    unsafe extern "system" fn each(hwnd: HWND, data: LPARAM) -> BOOL {
+        // Só janelas visíveis: as ocultas ("Default IME") de muitos processos sadios
+        // também se dizem travadas.
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() || !IsHungAppWindow(hwnd).as_bool() {
+                return BOOL(1);
+            }
+            // A janela fantasma que o Windows põe no lugar da travada é do dwm.exe.
+            let mut class = [0u16; 8];
+            let len = GetClassNameW(hwnd, &mut class) as usize;
+            if String::from_utf16_lossy(&class[..len]) == "Ghost" {
+                return BOOL(1);
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            let out = &mut *(data.0 as *mut std::collections::HashSet<u32>);
+            out.insert(pid);
+        }
+        BOOL(1)
+    }
+    let mut out = std::collections::HashSet::new();
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&raw mut out as isize));
+    }
+    out.remove(&0);
+    out
+}
+
+/// Handle para ler o código de saída de um processo quando ele encerrar. Confere a
+/// hora de criação (±2 s): o PID pode já ser de outro.
+pub(crate) fn watch_exit(pid: u32, start: u64) -> Option<HandleGuard> {
+    unsafe {
+        let guard = HandleGuard(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?);
+        creation_time(guard.0).is_some_and(|t| t.abs_diff(start) <= 2).then_some(guard)
+    }
+}
+
+/// Código de saída, ou `None` enquanto o processo roda.
+pub(crate) fn exit_code(handle: &HandleGuard) -> Option<u32> {
+    const STILL_ACTIVE: u32 = 259;
+    let mut code = 0u32;
+    unsafe { GetExitCodeProcess(handle.0, &mut code).ok()? };
+    (code != STILL_ACTIVE).then_some(code)
+}
+
 pub(crate) struct HandleGuard(pub(crate) HANDLE);
 
 impl Drop for HandleGuard {

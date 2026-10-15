@@ -91,6 +91,13 @@ fn body(app: &mut App, ui: &mut Ui) {
                     ui.label(RichText::new("Não roda nada até ser retomado.").font(theme::regular(12.0)).color(INK_3));
                 });
             }
+            for problem in &p.problems {
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    crate::ui::processes::problem_pill(ui, *problem);
+                    ui.label(RichText::new(problem.detail()).font(theme::regular(12.0)).color(INK_3));
+                });
+            }
             ui.add_space(16.0);
             live_charts(app, ui, key, p.cpu, p.memory);
             ui.add_space(18.0);
