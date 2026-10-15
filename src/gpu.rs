@@ -19,12 +19,22 @@ use windows::Win32::System::Performance::{
 };
 use windows::core::{PCWSTR, w};
 
-/// Um adaptador físico, identificado pelo LUID no formato dos nomes de instância do PDH.
+/// Um adaptador físico. O DXGI dá um LUID por saída de vídeo, e uma GPU que atende
+/// várias telas aparece várias vezes; aqui ela é uma só, com todos os seus LUIDs no
+/// formato dos nomes de instância do PDH.
 #[derive(Clone, Debug)]
 pub struct Adapter {
     pub name: String,
-    pub luid: String,
+    /// Fabricante, dispositivo, subsistema e revisão do PCI: a identidade da peça.
+    id: (u32, u32, u32, u32),
+    pub luids: Vec<String>,
     pub vram_total: u64,
+}
+
+impl Adapter {
+    fn owns(&self, instance: &str) -> bool {
+        self.luids.iter().any(|luid| contains_ci(instance, luid))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -124,7 +134,7 @@ impl GpuMonitor {
         let memory = self.memory;
         let mut vram = vec![0u64; n];
         read_array(memory, &mut self.buffer, |name, value| {
-            if let Some(i) = self.adapters.iter().position(|a| contains_ci(name, &a.luid)) {
+            if let Some(i) = self.adapters.iter().position(|a| a.owns(name)) {
                 vram[i] = vram[i].max(value.max(0.0) as u64);
             }
         });
@@ -133,7 +143,7 @@ impl GpuMonitor {
     }
 
     fn adapter_index(&self, engine_key: &str) -> Option<usize> {
-        self.adapters.iter().position(|a| contains_ci(engine_key, &a.luid))
+        self.adapters.iter().position(|a| a.owns(engine_key))
     }
 }
 
@@ -209,11 +219,19 @@ fn enumerate_adapters() -> Vec<Adapter> {
                 "luid_0x{:08x}_0x{:08x}",
                 desc.AdapterLuid.HighPart as u32, desc.AdapterLuid.LowPart
             );
-            // O mesmo adaptador pode aparecer duas vezes (uma por saída de vídeo).
-            if out.iter().any(|a: &Adapter| a.luid == luid) {
-                continue;
+            // A mesma placa volta uma vez por saída de vídeo, cada uma com o seu LUID:
+            // num notebook com dock DisplayLink, a GPU integrada aparecia quatro vezes.
+            // Quem diz que é a mesma peça é o par fabricante/dispositivo do PCI.
+            let id = (desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision);
+            match out.iter_mut().find(|a: &&mut Adapter| a.id == id) {
+                Some(known) => known.luids.push(luid),
+                None => out.push(Adapter {
+                    name,
+                    id,
+                    luids: vec![luid],
+                    vram_total: desc.DedicatedVideoMemory as u64,
+                }),
             }
-            out.push(Adapter { name, luid, vram_total: desc.DedicatedVideoMemory as u64 });
         }
     }
     out
@@ -222,6 +240,28 @@ fn enumerate_adapters() -> Vec<Adapter> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As placas desta máquina depois do agrupamento, com um LUID por saída de
+    /// vídeo: `cargo test adaptadores -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn adaptadores_desta_maquina() {
+        println!("{:#?}", enumerate_adapters());
+    }
+
+    #[test]
+    fn a_mesma_placa_em_varias_saidas_e_um_adaptador_so() {
+        let adapter = Adapter {
+            name: "Intel(R) Iris(R) Xe Graphics".to_owned(),
+            id: (0x8086, 0x46a8, 0x3b3a17aa, 12),
+            luids: vec!["luid_0x00000000_0x00011bb7".to_owned(), "luid_0x00000000_0x0005993c".to_owned()],
+            vram_total: 134_217_728,
+        };
+        // O motor que o PDH relata na segunda saída é da mesma placa.
+        assert!(adapter.owns("luid_0x00000000_0x0005993C_phys_0_eng_0"));
+        assert!(adapter.owns("luid_0x00000000_0x00011BB7_phys_0_eng_3"));
+        assert!(!adapter.owns("luid_0x00000000_0x00012315_phys_0_eng_0"));
+    }
 
     #[test]
     fn instancia_de_motor() {

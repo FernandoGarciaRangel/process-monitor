@@ -96,6 +96,13 @@ O sysinfo 0.39 publicado não tem GPU; a feature `gpu` que aparece na documenta�
 `PdhAddEnglishCounterW`, porque o Windows é pt-BR e os nomes dos contadores são
 localizados.
 
+🔴 O DXGI devolve a mesma placa uma vez por saída de vídeo, cada uma com o seu
+LUID: no notebook com dock DisplayLink, a Intel integrada vinha quatro vezes (e
+virava quatro cartões na barra lateral). O `enumerate_adapters` agrupa pelo par
+fabricante/dispositivo do PCI e guarda todos os LUIDs do mesmo adaptador
+(`Adapter::owns`), porque os contadores do PDH chegam por LUID. Conferir:
+`cargo test adaptadores -- --ignored --nocapture`.
+
 ## 🔴 Identidade de processo
 
 - PID sozinho é reaproveitado. A chave é `ProcKey` (PID + hora de criação), e o
@@ -230,6 +237,23 @@ criação; case com a coleta pelos dois (±2 s), nunca só pelo PID.
   administrador; nas conexões IPv6 o botão nem aparece.
 - "Liberar porta" de um servidor de desenvolvimento finaliza a árvore desde
   `server_root`; a tela de portas avisa de projeto rodando duas vezes (`ports::conflicts`).
+
+## Ficha da máquina (tela "Sistema")
+
+`src/system.rs` lê o que não muda com o app aberto: modelo, placa-mãe e BIOS do
+registro (`HARDWARE\DESCRIPTION\System\BIOS`), versão do Windows de
+`CurrentVersion`, monitores pelo GDI e os módulos de memória do SMBIOS
+(`GetSystemFirmwareTable(RSMB)`, estruturas do tipo 17). Nada de WMI: a primeira
+consulta custa centenas de milissegundos e exigiria COM na thread da interface.
+
+- A leitura é uma só, na primeira visita (`App::system_info`). Não chame no `logic`.
+- `ProductName` ainda diz "Windows 10" no Windows 11; a correção vem da compilação
+  (≥ 22000). Fabricantes deixam campos com texto de exemplo ("To Be Filled By
+  O.E.M."), que o `clean` apaga.
+- A lista de adaptadores do registro traz telas virtuais (DisplayLink, Miracast)
+  que não são placa de vídeo: a seção mostra as GPUs da coleta e usa o registro só
+  para a versão do driver. Só com `gpus` vazio (PDH sem contadores) ela cai no registro.
+- Conferir o que esta máquina devolve: `cargo test ficha -- --ignored --nocapture`.
 
 ## Windows em português
 

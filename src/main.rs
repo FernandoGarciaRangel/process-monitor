@@ -16,6 +16,7 @@ mod rules;
 mod sampler;
 mod services;
 mod startup;
+mod system;
 mod theme;
 mod tray;
 mod ui;

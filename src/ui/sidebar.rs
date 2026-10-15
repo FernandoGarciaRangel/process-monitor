@@ -30,6 +30,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if nav_item(ui, app.view == View::Ports, icon::PLUGS_CONNECTED, "Portas", &ports.to_string()).clicked() {
         app.view = View::Ports;
     }
+    // Ficha da máquina: sem contador, porque não há o que contar.
+    if nav_item(ui, app.view == View::System, icon::COMPUTER_TOWER, "Sistema", "").clicked() {
+        app.view = View::System;
+    }
 
     ui.add_space(12.0);
     widgets::section_label(ui, "Desempenho");
