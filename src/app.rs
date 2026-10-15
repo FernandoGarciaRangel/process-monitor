@@ -25,6 +25,7 @@ pub enum View {
     Services,
     Startup,
     Ports,
+    System,
     Cpu,
     Memory,
     Disk,
@@ -40,6 +41,7 @@ impl View {
             View::Services => "services".to_owned(),
             View::Startup => "startup".to_owned(),
             View::Ports => "ports".to_owned(),
+            View::System => "system".to_owned(),
             View::Cpu => "cpu".to_owned(),
             View::Memory => "memory".to_owned(),
             View::Disk => "disk".to_owned(),
@@ -54,6 +56,7 @@ impl View {
             "services" => View::Services,
             "startup" => View::Startup,
             "ports" => View::Ports,
+            "system" => View::System,
             "cpu" => View::Cpu,
             "memory" => View::Memory,
             "disk" => View::Disk,
@@ -347,6 +350,8 @@ pub struct App {
     pub rules: Vec<rules::Rule>,
     pub selected_service: Option<String>,
     pub startup: ui::startup::State,
+    /// Ficha da máquina, lida uma vez na primeira visita à tela "Sistema".
+    pub system_info: Option<Arc<crate::system::SystemInfo>>,
     /// Containers do Docker e distros do WSL por trás das portas, lidos com a tela aberta.
     pub containers: containers::Watcher,
     pub container_info: Arc<containers::Info>,
@@ -473,6 +478,7 @@ impl App {
             rules: stored(RULES_KEY).map(|v| rules::parse(&v)).unwrap_or_default(),
             selected_service: None,
             startup: ui::startup::State::new(cc.egui_ctx.clone()),
+            system_info: None,
             containers: containers::Watcher::new(cc.egui_ctx.clone()),
             container_info: Arc::default(),
         };
@@ -1451,6 +1457,7 @@ impl eframe::App for App {
                     View::Services => ui::services::show(self, ui, &snap),
                     View::Startup => ui::startup::show(self, ui, &snap),
                     View::Ports => ui::ports::show(self, ui, &snap),
+                    View::System => ui::system::show(self, ui, &snap),
                     other => ui::performance::show(self, ui, &snap, other),
                 },
             });
@@ -1618,7 +1625,7 @@ mod tests {
 
     #[test]
     fn preferencias_salvas_voltam_iguais() {
-        for view in [View::Processes, View::Services, View::Startup, View::Ports, View::Cpu, View::Memory, View::Disk, View::Network, View::Gpu(1)] {
+        for view in [View::Processes, View::Services, View::Startup, View::Ports, View::System, View::Cpu, View::Memory, View::Disk, View::Network, View::Gpu(1)] {
             assert_eq!(View::from_key(&view.key()), Some(view));
         }
         assert_eq!(View::from_key("gpu:x"), None);
