@@ -117,12 +117,11 @@ fn memory(ui: &mut Ui, info: &SystemInfo, s: &Snapshot) {
         });
         for module in info.memory.iter().filter(|m| !m.empty()) {
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&module.locator).font(theme::semibold(12.0)).color(INK_2));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(module_line(module)).font(theme::regular(12.0)).color(INK_3));
-                });
-            });
+            // Um embaixo do outro: o nome do slot ("Controller0-ChannelA-DIMM0") é
+            // longo, e lado a lado o detalhe alinhado à direita passava por cima dele.
+            // O detalhe quebra entre palavras: o código da peça não cabe partido.
+            ui.label(RichText::new(&module.locator).font(theme::semibold(12.0)).color(INK_2));
+            ui.add(egui::Label::new(RichText::new(module_line(module)).font(theme::regular(12.0)).color(INK_3)).wrap());
         }
     });
 }
@@ -279,11 +278,16 @@ fn grid(ui: &mut Ui, id: &str, body: impl FnOnce(&mut Ui)) {
 }
 
 /// Linha chave/valor. Campo que o firmware não traz não vira linha vazia.
+///
+/// Quebra entre palavras, ao contrário do `widgets::field`: aqui não há caminho
+/// nem linha de comando, e no meio da palavra saía "Single Langu / age".
 fn field(ui: &mut Ui, label: &str, value: &str) {
     if value.trim().is_empty() {
         return;
     }
-    widgets::field(ui, label, value);
+    ui.label(RichText::new(label).font(theme::regular(12.0)).color(INK_3));
+    ui.add(egui::Label::new(RichText::new(value).font(theme::regular(12.5)).color(INK)).wrap().selectable(true));
+    ui.end_row();
 }
 
 /// A ficha inteira em texto, para colar num chamado.
