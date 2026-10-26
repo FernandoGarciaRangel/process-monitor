@@ -12,6 +12,7 @@ mod gpu;
 mod health;
 mod icons;
 mod locks;
+mod netcheck;
 mod platform;
 mod ports;
 mod rules;

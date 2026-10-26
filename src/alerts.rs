@@ -1,5 +1,6 @@
 //! Alertas: porta vigiada que caiu ou voltou, processo com CPU alta por um tempo,
-//! processo com memória alta, processo travado ou reiniciando em loop e disco quase cheio. A avaliação roda na thread da coleta, que continua viva
+//! processo com memória alta, processo travado ou reiniciando em loop, disco quase
+//! cheio e problemas de rede. A avaliação roda na thread da coleta, que continua viva
 //! com a janela escondida na bandeja; aqui fica só a regra, sem chamada de sistema.
 
 use std::collections::hash_map::Entry;
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::format;
 use crate::health::Problem;
+use crate::netcheck::Issue;
 use crate::ports::Listener;
 use crate::sampler::{DiskInfo, ProcInfo, ProcKey};
 
@@ -22,6 +24,9 @@ const DISK_RESET_POINTS: f32 = 5.0;
 /// Um programa em loop avisa no máximo uma vez nesse tempo: cada cópia nova tem outro
 /// PID, e sem isso o aviso viria a cada reinício.
 const RESTART_QUIET: Duration = Duration::from_secs(10 * 60);
+/// O mesmo problema de rede avisa no máximo uma vez nesse tempo: conexão que cai e
+/// volta a cada minuto não vira um balão por minuto.
+const NETWORK_QUIET: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -38,6 +43,8 @@ pub struct Config {
     pub disk_enabled: bool,
     /// Avisa quando o espaço livre de uma unidade cai abaixo desta porcentagem.
     pub disk_free_percent: f32,
+    /// Sem internet, DNS fora, conexão instável, Wi-Fi fraco ou caindo (`netcheck`).
+    pub network_enabled: bool,
 }
 
 impl Default for Config {
@@ -53,6 +60,7 @@ impl Default for Config {
             problems_enabled: true,
             disk_enabled: true,
             disk_free_percent: 10.0,
+            network_enabled: true,
         }
     }
 }
@@ -63,6 +71,7 @@ pub enum Target {
     Process(ProcKey),
     Port(u16),
     Disk,
+    Network,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,6 +97,12 @@ pub struct Alerts {
     port_down: HashSet<u16>,
     /// Unidades (pelo ponto de montagem) que já avisaram e ainda não liberaram espaço.
     disk_alerted: HashSet<String>,
+    /// Problemas de rede presentes na última coleta, pelo tipo.
+    network_active: HashSet<&'static str>,
+    /// Quando cada tipo de problema de rede avisou pela última vez.
+    network_alerted: HashMap<&'static str, Instant>,
+    /// Desde quando está sem internet, e se a queda avisou (para avisar a volta).
+    offline_since: Option<(Instant, bool)>,
 }
 
 impl Alerts {
@@ -245,6 +260,54 @@ impl Alerts {
             }
         } else {
             self.disk_alerted.clear();
+        }
+        out
+    }
+}
+
+impl Alerts {
+    /// Avisa cada problema de rede quando aparece e, depois de uma queda que avisou,
+    /// quando a internet volta. Os dos processos (não conecta, não fecha conexões)
+    /// ficam só na tela: um programa insistindo num servidor bloqueado avisaria sem fim.
+    pub fn evaluate_network(&mut self, now: Instant, issues: &[Issue], config: &Config) -> Vec<Alert> {
+        let mut out = Vec::new();
+        if !config.network_enabled {
+            self.network_active.clear();
+            self.offline_since = None;
+            return out;
+        }
+        let machine: Vec<&Issue> = issues.iter().filter(|i| i.process().is_none()).collect();
+        let mut down_alerted = false;
+        for issue in &machine {
+            let kind = issue.kind();
+            if !self.network_active.insert(kind) {
+                continue;
+            }
+            if self.network_alerted.get(kind).is_some_and(|at| now.duration_since(*at) < NETWORK_QUIET) {
+                continue;
+            }
+            self.network_alerted.insert(kind, now);
+            down_alerted |= issue.is_down();
+            out.push(Alert { title: issue.title(), body: issue.detail(), target: Target::Network });
+        }
+        self.network_active.retain(|kind| machine.iter().any(|i| i.kind() == *kind));
+
+        let down = machine.iter().any(|i| i.is_down());
+        match &mut self.offline_since {
+            None if down => self.offline_since = Some((now, down_alerted)),
+            // Sem internet ainda, mas pode ter passado de "roteador" para "provedor".
+            Some((_, alerted)) if down => *alerted |= down_alerted,
+            Some((since, alerted)) => {
+                if *alerted {
+                    out.push(Alert {
+                        title: "A internet voltou".to_owned(),
+                        body: format!("Ficou fora por {}.", format::duration(now.duration_since(*since).as_secs())),
+                        target: Target::Network,
+                    });
+                }
+                self.offline_since = None;
+            }
+            None => {}
         }
         out
     }
@@ -436,6 +499,36 @@ mod tests {
         assert!(alerts.evaluate(t, &[], &[], &[disk(50)], &config, ME).is_empty());
         alerts.evaluate(t, &[], &[], &[disk(200)], &config, ME);
         assert_eq!(alerts.evaluate(t, &[], &[], &[disk(50)], &config, ME).len(), 1);
+    }
+
+    #[test]
+    fn rede_cai_e_volta() {
+        let config = Config::default();
+        let mut alerts = Alerts::default();
+        let t = Instant::now();
+        let at = |s: u64| t + Duration::from_secs(s);
+        let down = [Issue::NoInternet { router_ok: true }];
+        let fired = alerts.evaluate_network(at(0), &down, &config);
+        assert_eq!((fired.len(), fired[0].target), (1, Target::Network));
+        // Continua fora: não repete.
+        assert!(alerts.evaluate_network(at(5), &down, &config).is_empty());
+        // Voltou: avisa com o tempo fora.
+        let back = alerts.evaluate_network(at(65), &[], &config);
+        assert_eq!(back[0].title, "A internet voltou");
+        assert_eq!(back[0].body, format!("Ficou fora por {}.", format::duration(65)));
+        // Caiu de novo logo depois: dentro dos 10 min, nem a queda nem a volta avisam.
+        assert!(alerts.evaluate_network(at(70), &down, &config).is_empty());
+        assert!(alerts.evaluate_network(at(80), &[], &config).is_empty());
+        // Depois dos 10 min, avisa de novo.
+        assert_eq!(alerts.evaluate_network(at(700), &down, &config).len(), 1);
+
+        // Problema de um processo só aparece na tela.
+        let key = ProcKey { pid: 10, start: 100 };
+        let stuck = [Issue::SocketLeak { key, process: "app.exe".into(), count: 30 }];
+        assert!(Alerts::default().evaluate_network(at(0), &stuck, &config).is_empty());
+        // Desligado, nada.
+        let off = Config { network_enabled: false, ..Config::default() };
+        assert!(Alerts::default().evaluate_network(at(0), &down, &off).is_empty());
     }
 
     #[test]

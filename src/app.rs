@@ -554,6 +554,7 @@ impl App {
                 }
             }
             Some(alerts::Target::Disk) => self.view = View::Disk,
+            Some(alerts::Target::Network) => self.view = View::Network,
             None => {}
         }
     }
@@ -1649,6 +1650,7 @@ const ALERT_MEMORY_KEY: &str = "alert_memory_bytes";
 const ALERT_PROBLEMS_ON_KEY: &str = "alert_problems_on";
 const ALERT_DISK_ON_KEY: &str = "alert_disk_on";
 const ALERT_DISK_PERCENT_KEY: &str = "alert_disk_free_percent";
+const ALERT_NETWORK_ON_KEY: &str = "alert_network_on";
 
 /// Configuração dos alertas salva; o que faltar ou for inválido fica no padrão.
 fn load_alert_config(stored: &dyn Fn(&str) -> Option<String>) -> alerts::Config {
@@ -1671,6 +1673,7 @@ fn load_alert_config(stored: &dyn Fn(&str) -> Option<String>) -> alerts::Config 
             .and_then(|v| v.parse().ok())
             .filter(|v: &f32| (1.0..=50.0).contains(v))
             .unwrap_or(defaults.disk_free_percent),
+        network_enabled: flag(ALERT_NETWORK_ON_KEY, defaults.network_enabled),
     }
 }
 
@@ -1686,6 +1689,7 @@ fn save_alert_config(storage: &mut dyn eframe::Storage, c: &alerts::Config) {
     storage.set_string(ALERT_PROBLEMS_ON_KEY, flag(c.problems_enabled));
     storage.set_string(ALERT_DISK_ON_KEY, flag(c.disk_enabled));
     storage.set_string(ALERT_DISK_PERCENT_KEY, c.disk_free_percent.to_string());
+    storage.set_string(ALERT_NETWORK_ON_KEY, flag(c.network_enabled));
 }
 
 /// Lê a entrada de inicialização. Se ela aponta para outro executável (o app foi

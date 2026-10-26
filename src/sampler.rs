@@ -243,6 +243,8 @@ pub struct Snapshot {
     pub listeners: Vec<Listener>,
     /// As demais conexões TCP, para o painel de detalhes.
     pub connections: Vec<Connection>,
+    /// Testes de conectividade e os problemas de rede encontrados.
+    pub network: crate::netcheck::Status,
     pub history: History,
     /// Quanto tempo as séries de `history` cobrem.
     pub history_window: Duration,
@@ -406,6 +408,8 @@ fn run(
     let mut alert_sink: Option<AlertSink> = None;
     let mut rules = crate::rules::Applier::default();
     let mut health = crate::health::Health::default();
+    let prober = crate::netcheck::Prober::spawn();
+    let mut sockets = crate::netcheck::Sockets::default();
     // Buffer da leitura de threads, reaproveitado: tem centenas de KB.
     let mut threads_buf: Vec<u8> = Vec::new();
     let own_pid = std::process::id();
@@ -533,6 +537,15 @@ fn run(
             })
             .unwrap_or_default();
 
+        let connections = ports::connections();
+        let measured = prober.latest();
+        let mut net_issues = crate::netcheck::diagnose(&measured);
+        let stuck = sockets.update(Instant::now(), &connections, &processes, own_pid);
+        // Sem internet, todo programa "não consegue conectar": o aviso geral basta.
+        if !net_issues.iter().any(|i| i.is_down()) {
+            net_issues.extend(stuck);
+        }
+
         let mem_total = sys.total_memory();
         let mem_used = sys.used_memory();
         history.cpu.push(cpu);
@@ -577,7 +590,8 @@ fn run(
             battery: platform::battery(),
             processes,
             listeners: ports::listeners(),
-            connections: ports::connections(),
+            connections,
+            network: crate::netcheck::Status { measured, issues: net_issues },
             history: history.clone(),
             history_window: window,
         };
@@ -587,7 +601,7 @@ fn run(
         rules.apply(&snapshot.processes, own_pid);
 
         if let Some(sink) = &alert_sink {
-            let fired = alerts.evaluate(
+            let mut fired = alerts.evaluate(
                 Instant::now(),
                 &snapshot.processes,
                 &snapshot.listeners,
@@ -595,6 +609,7 @@ fn run(
                 &alert_config,
                 own_pid,
             );
+            fired.extend(alerts.evaluate_network(Instant::now(), &snapshot.network.issues, &alert_config));
             for alert in &fired {
                 sink(alert);
             }

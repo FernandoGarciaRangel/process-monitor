@@ -283,7 +283,7 @@ fn video_drivers() -> Vec<VideoDriver> {
     out
 }
 
-fn wide_to_string(buf: &[u16]) -> String {
+pub fn wide_to_string(buf: &[u16]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..len]).trim().to_owned()
 }

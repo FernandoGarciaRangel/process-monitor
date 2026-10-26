@@ -208,6 +208,26 @@ para o clique no balão abrir o processo ou a porta.
 - O balão não deixa rastro (nem no histórico de notificações do Windows). No debug, cada
   aviso sai no console do `dev.ps1` como `[alerta] título | texto`.
 
+## Rede: diagnóstico
+
+`src/netcheck.rs`. A thread `netcheck` mede a cada 5 s; a thread da coleta conclui
+(`diagnose` e `Sockets`, sem chamada de sistema, testáveis) e põe em `Snapshot.network`.
+Roda também com a janela na bandeja, porque os alertas dependem dela.
+
+- Camadas: ping no roteador (`GetBestRoute` + `IcmpSendEcho`), DNS com `DnsQuery_W`
+  **sem cache** (o cache do Windows responde mesmo com o servidor fora) e conexão TCP com
+  1.1.1.1:443 e 8.8.8.8:443 pelo IP, para não depender do DNS.
+- Queda só depois de 2 rodadas seguidas. Há roteador que nunca responde a ping: a falha
+  dele só conta se ele já respondeu antes (`gateway_answers`).
+- Wi-Fi pelo `wlanapi`. No Windows 11 24H2+ os detalhes podem exigir a permissão de
+  localização; sem ela fica só "Conectado". Fraco: abaixo de 40% em 3 leituras seguidas.
+- "Não consegue conectar": `SYN_SENT` para o mesmo endereço há 15 s. O Windows desiste
+  em 21 s; nova tentativa em até 10 s continua a contagem. Com a internet fora, esses
+  avisos somem (todo programa estaria "sem conectar").
+- Os alertas são só dos problemas da máquina, no máximo um por tipo a cada 10 min, e
+  "A internet voltou" depois de uma queda que avisou. Os dos processos ficam só na tela.
+- Conferir o que esta máquina devolve: `cargo test leitura_da_rede -- --ignored --nocapture`.
+
 ## Quem está usando um arquivo
 
 `src/locks.rs` usa o Restart Manager (o mesmo do instalador): pega arquivos abertos

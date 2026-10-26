@@ -1,9 +1,11 @@
 //! Telas de desempenho: um gráfico grande por recurso e as estatísticas em volta.
 
 use egui::{Align, Align2, Color32, Layout, Margin, RichText, Ui, pos2, vec2};
+use egui_phosphor::regular as icon;
 
 use crate::app::{App, View};
 use crate::format;
+use crate::netcheck::{self, Issue, Step};
 use crate::sampler::{Snapshot, percent_of};
 use crate::theme::{self, CPU, DISK, GPU, INK, INK_2, INK_3, INK_4, MEMORY, NETWORK};
 use crate::ui::widgets::{self, ChartStyle, Layer};
@@ -13,7 +15,7 @@ pub fn show(app: &mut App, ui: &mut Ui, s: &Snapshot, view: View) {
         View::Cpu => cpu(ui, s),
         View::Memory => memory(ui, s),
         View::Disk => disk(ui, s),
-        View::Network => network(ui, s),
+        View::Network => network(app, ui, s),
         View::Gpu(i) => gpu(app, ui, s, i),
         View::Processes | View::Services | View::Startup | View::Ports | View::System => {}
     });
@@ -214,11 +216,12 @@ fn disk(ui: &mut Ui, s: &Snapshot) {
     top_list(ui, top.iter().take(6).map(|p| (p.display_name(), p.pid, format::rate(p.disk_rate()), (p.disk_rate() / peak) as f32)), DISK);
 }
 
-fn network(ui: &mut Ui, s: &Snapshot) {
+fn network(app: &mut App, ui: &mut Ui, s: &Snapshot) {
     let tx_color = theme::lerp(NETWORK, Color32::WHITE, 0.45);
     let max = widgets::nice_max(s.history.net_rx.max().max(s.history.net_tx.max()), 64.0 * 1024.0);
     let subtitle = if s.net_adapters.is_empty() { "Sem adaptador ativo".to_owned() } else { s.net_adapters.join(" · ") };
     title(ui, "Rede", &subtitle, &format::rate(s.net_rx + s.net_tx), NETWORK);
+    network_issues(app, ui, &s.network.issues);
     big_chart(
         ui,
         s,
@@ -243,6 +246,122 @@ fn network(ui: &mut Ui, s: &Snapshot) {
             ("Enviado desde o boot", format::bytes(s.net_tx_total)),
         ],
     );
+    ui.add_space(22.0);
+    diagnosis(ui, &s.network.measured);
+}
+
+/// Os problemas de rede em cima do gráfico: o da máquina primeiro, depois os dos processos.
+fn network_issues(app: &mut App, ui: &mut Ui, issues: &[Issue]) {
+    if issues.is_empty() {
+        return;
+    }
+    widgets::card().inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        for (i, issue) in issues.iter().enumerate() {
+            if i > 0 {
+                ui.add_space(8.0);
+            }
+            ui.horizontal(|ui| {
+                let color = if issue.severe() { theme::DANGER } else { theme::ACCENT };
+                ui.label(RichText::new(icon::WARNING).font(theme::regular(16.0)).color(color));
+                // O botão entra primeiro, pela direita; o texto fica com o que sobra e quebra.
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                    if let Some(key) = issue.process()
+                        && widgets::ghost_button(ui, "Ver processo").clicked()
+                    {
+                        app.view = View::Processes;
+                        app.select(Some(key));
+                        app.scroll_to_selected = true;
+                    }
+                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.label(RichText::new(issue.title()).font(theme::semibold(13.0)).color(INK));
+                        ui.add(egui::Label::new(RichText::new(issue.detail()).font(theme::regular(12.0)).color(INK_2)).wrap());
+                    });
+                });
+            });
+        }
+    });
+    ui.add_space(14.0);
+}
+
+/// Cada camada da conexão com o resultado do último teste, e o que dá contexto a ele.
+fn diagnosis(ui: &mut Ui, m: &netcheck::Measured) {
+    widgets::section_label(ui, "Diagnóstico");
+    ui.add_space(8.0);
+    let last = m.last();
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let gateway = match m.gateway {
+            Some(ip) => format!("Roteador · {ip}"),
+            None => "Roteador".to_owned(),
+        };
+        let steps = [
+            (gateway, last.map(|r| r.gateway), m.gateway.is_some() && !m.gateway_answers),
+            ("DNS".to_owned(), last.map(|r| r.dns), false),
+            ("Internet".to_owned(), last.map(|r| r.internet), false),
+        ];
+        ui.columns(steps.len(), |columns| {
+            for (col, (label, step, silent)) in columns.iter_mut().zip(&steps) {
+                let (color, text) = match step {
+                    None => (INK_4, "Testando…".to_owned()),
+                    _ if !m.online => (theme::DANGER, "Sem rede".to_owned()),
+                    Some(Step::Ok(ms)) => (theme::OK, format!("Respondendo · {ms} ms")),
+                    // Roteador que nunca respondeu a ping: não é falha, ele só não responde.
+                    Some(Step::Failed) if *silent => (INK_4, "Não responde a ping".to_owned()),
+                    Some(Step::Failed) => (theme::DANGER, "Sem resposta".to_owned()),
+                    Some(Step::Skipped) => (INK_4, "Não testado".to_owned()),
+                };
+                col.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    ui.label(RichText::new(label).font(theme::regular(11.5)).color(INK_3));
+                    widgets::legend(ui, color, &text);
+                });
+            }
+        });
+    });
+    ui.add_space(14.0);
+
+    let loss = m.loss().map_or("—".to_owned(), |p| format!("{p}%"));
+    let latency = m.latency().map_or("—".to_owned(), |ms| format!("{ms} ms"));
+    let adapter = m.adapter.as_ref().map_or("—".to_owned(), |a| {
+        if a.speed > 0 { format!("{} · {}", a.name, link_speed(a.speed)) } else { a.name.clone() }
+    });
+    let wifi = match &m.wifi {
+        Some(w) if w.connected && w.ssid.is_empty() => "Conectado".to_owned(),
+        Some(w) if w.connected => match w.rssi {
+            Some(dbm) => format!("{} · {}% ({dbm} dBm)", w.ssid, w.signal),
+            None => format!("{} · {}%", w.ssid, w.signal),
+        },
+        Some(_) => "Desconectado".to_owned(),
+        None => "—".to_owned(),
+    };
+    stats_row(
+        ui,
+        &[
+            ("Perda (2 min)", loss),
+            ("Latência", latency),
+            ("Adaptador", adapter),
+            ("Wi-Fi", wifi),
+        ],
+    );
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(format!(
+            "Testa a cada {} s: ping no roteador, consulta ao DNS sem o cache do Windows e uma conexão com 1.1.1.1 e 8.8.8.8.",
+            netcheck::ROUND_EVERY.as_secs()
+        ))
+        .font(theme::regular(11.5))
+        .color(INK_4),
+    );
+}
+
+fn link_speed(bps: u64) -> String {
+    if bps >= 1_000_000_000 && bps.is_multiple_of(1_000_000_000) {
+        format!("{} Gbps", bps / 1_000_000_000)
+    } else {
+        format!("{} Mbps", bps / 1_000_000)
+    }
 }
 
 fn gpu(_app: &mut App, ui: &mut Ui, s: &Snapshot, index: usize) {

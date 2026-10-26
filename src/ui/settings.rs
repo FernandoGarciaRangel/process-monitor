@@ -511,6 +511,21 @@ fn alerts_section(app: &mut App, ui: &mut Ui) {
     });
 
     ui.add_space(16.0);
+    heading(ui, "Rede");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        row(
+            ui,
+            "Problemas de rede",
+            "Sem internet, DNS fora, conexão instável ou lenta, Wi-Fi fraco ou caindo. Avisa também quando a internet volta.",
+            40.0,
+            |ui| {
+                widgets::toggle(ui, &mut config.network_enabled);
+            },
+        );
+    });
+
+    ui.add_space(16.0);
     ui.horizontal(|ui| {
         if widgets::ghost_button(ui, &format!("{}  Testar aviso", icon::BELL_SIMPLE_RINGING)).clicked() {
             app.tray.notifier().notify("Teste de alerta", "Os avisos do Process Monitor aparecem assim.");
