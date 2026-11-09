@@ -56,6 +56,22 @@ pub fn datetime(unix_secs: u64) -> String {
     }
 }
 
+/// Hora local de um instante próximo, dita em relação a `now` (segundos Unix):
+/// `às 15:30`, `amanhã às 09:10`, `em 12/11 às 18:00`.
+pub fn when(unix_secs: i64, now: i64) -> String {
+    use chrono::{Local, TimeZone};
+    let (Some(at), Some(today)) = (Local.timestamp_opt(unix_secs, 0).single(), Local.timestamp_opt(now, 0).single()) else {
+        return "—".to_owned();
+    };
+    let days = (at.date_naive() - today.date_naive()).num_days();
+    let clock = at.format("%H:%M");
+    match days {
+        0 => format!("às {clock}"),
+        1 => format!("amanhã às {clock}"),
+        _ => format!("em {} às {clock}", at.format("%d/%m")),
+    }
+}
+
 /// Frequência em GHz a partir de MHz: `3,40 GHz`.
 pub fn ghz(mhz: u64) -> String {
     format!("{} GHz", decimal(mhz as f64 / 1000.0, 2))

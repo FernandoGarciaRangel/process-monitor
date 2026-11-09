@@ -25,6 +25,7 @@ mod theme;
 mod tray;
 mod ui;
 mod updater;
+mod usage;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();

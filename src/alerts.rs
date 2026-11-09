@@ -1,7 +1,8 @@
 //! Alertas: porta vigiada que caiu ou voltou, processo com CPU alta por um tempo,
 //! processo com memória alta, processo travado ou reiniciando em loop, disco quase
-//! cheio e problemas de rede. A avaliação roda na thread da coleta, que continua viva
-//! com a janela escondida na bandeja; aqui fica só a regra, sem chamada de sistema.
+//! cheio, problemas de rede e limites de IA. A avaliação roda na thread da coleta (e,
+//! para a IA, na thread `usage`), que continuam vivas com a janela escondida na bandeja;
+//! aqui fica só a regra, sem chamada de sistema.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -45,6 +46,10 @@ pub struct Config {
     pub disk_free_percent: f32,
     /// Sem internet, DNS fora, conexão instável, Wi-Fi fraco ou caindo (`netcheck`).
     pub network_enabled: bool,
+    /// Limite de IA (Claude, Codex) passou de [`USAGE_THRESHOLDS`].
+    pub usage_enabled: bool,
+    /// Uma janela que chegou a avisar renovou.
+    pub usage_reset_enabled: bool,
 }
 
 impl Default for Config {
@@ -61,6 +66,8 @@ impl Default for Config {
             disk_enabled: true,
             disk_free_percent: 10.0,
             network_enabled: true,
+            usage_enabled: true,
+            usage_reset_enabled: true,
         }
     }
 }
@@ -72,6 +79,8 @@ pub enum Target {
     Port(u16),
     Disk,
     Network,
+    /// Tela "IA".
+    Usage,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -313,6 +322,130 @@ impl Alerts {
     }
 }
 
+/// Limites de IA que avisam, em % da janela.
+pub const USAGE_THRESHOLDS: [f32; 2] = [75.0, 90.0];
+/// Dois `resets_at` mais distantes que isso são janelas diferentes; mais perto, é a mesma
+/// janela lida por outra fonte (cada uma arredonda de um jeito).
+const USAGE_SAME_WINDOW_SECS: i64 = 30 * 60;
+
+/// Uma janela de limite de IA, como o alerta vê.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageWindow {
+    /// "Claude", "Codex".
+    pub provider: String,
+    pub id: String,
+    /// "de 5 h", "semanal".
+    pub phrase: String,
+    pub used: f32,
+    /// Segundos Unix.
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct UsageMark {
+    resets_at: Option<i64>,
+    /// Quantos limiares já avisaram nesta janela.
+    level: usize,
+    phrase: String,
+}
+
+/// Avisos de limite de IA: 75% e 90% uma vez por janela e, se ela chegou a avisar, a
+/// renovação. Guardado em disco pela thread `usage`: reabrir o app não repete o aviso.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct UsageAlerts {
+    marks: HashMap<(String, String), UsageMark>,
+}
+
+impl UsageAlerts {
+    /// `now` em segundos Unix.
+    pub fn evaluate(&mut self, now: i64, windows: &[UsageWindow], config: &Config) -> Vec<Alert> {
+        let mut out = Vec::new();
+        if !config.usage_enabled {
+            self.marks.clear();
+            return out;
+        }
+        // Renovou: pelo relógio, sem esperar uma leitura nova (que pode demorar).
+        let mut renewed: Vec<(String, String)> = Vec::new();
+        for ((provider, _), mark) in self.marks.iter_mut() {
+            if mark.resets_at.is_some_and(|r| r <= now) {
+                if mark.level > 0 && config.usage_reset_enabled {
+                    renewed.push((provider.clone(), mark.phrase.clone()));
+                }
+                mark.level = 0;
+                mark.resets_at = None;
+            }
+        }
+        renewed.sort();
+        for (provider, phrase) in renewed {
+            out.push(Alert {
+                title: format!("{provider}: o limite {phrase} renovou"),
+                body: "A janela recomeçou do zero.".to_owned(),
+                target: Target::Usage,
+            });
+        }
+        for w in windows {
+            // Leitura de uma janela que já acabou: a % dela não vale mais.
+            if w.resets_at.is_some_and(|r| r <= now) {
+                continue;
+            }
+            let mark = self.marks.entry((w.provider.clone(), w.id.clone())).or_default();
+            mark.phrase = w.phrase.clone();
+            if let (Some(old), Some(new)) = (mark.resets_at, w.resets_at)
+                && (new - old).abs() > USAGE_SAME_WINDOW_SECS
+            {
+                mark.level = 0;
+            }
+            if w.resets_at.is_some() {
+                mark.resets_at = w.resets_at;
+            }
+            let crossed = USAGE_THRESHOLDS.iter().filter(|t| w.used >= **t).count();
+            if crossed > mark.level {
+                mark.level = crossed;
+                let threshold = USAGE_THRESHOLDS[crossed - 1];
+                let reset = match w.resets_at {
+                    Some(r) => format!(" Renova em {}, {}.", format::duration((r - now).max(0) as u64), format::when(r, now)),
+                    None => String::new(),
+                };
+                out.push(Alert {
+                    title: format!("{}: {}% do limite {}", w.provider, threshold as u32, w.phrase),
+                    body: format!("Já usou {} da janela.{reset}", format::percent(w.used)),
+                    target: Target::Usage,
+                });
+            }
+        }
+        out
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let marks: Vec<serde_json::Value> = self
+            .marks
+            .iter()
+            .map(|((provider, id), m)| {
+                serde_json::json!({"provider": provider, "id": id, "resets_at": m.resets_at, "level": m.level, "phrase": m.phrase})
+            })
+            .collect();
+        serde_json::Value::Array(marks)
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Self {
+        let marks = v
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| {
+                let key = (m.get("provider")?.as_str()?.to_owned(), m.get("id")?.as_str()?.to_owned());
+                let mark = UsageMark {
+                    resets_at: m.get("resets_at").and_then(serde_json::Value::as_i64),
+                    level: (m.get("level")?.as_u64()? as usize).min(USAGE_THRESHOLDS.len()),
+                    phrase: m.get("phrase").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned(),
+                };
+                Some((key, mark))
+            })
+            .collect();
+        Self { marks }
+    }
+}
+
 fn problem_alert(p: &ProcInfo, problem: Problem, title: String) -> Alert {
     Alert {
         title,
@@ -529,6 +662,60 @@ mod tests {
         // Desligado, nada.
         let off = Config { network_enabled: false, ..Config::default() };
         assert!(Alerts::default().evaluate_network(at(0), &down, &off).is_empty());
+    }
+
+    fn usage(id: &str, used: f32, resets_at: Option<i64>) -> UsageWindow {
+        UsageWindow { provider: "Claude".into(), id: id.into(), phrase: "de 5 h".into(), used, resets_at }
+    }
+
+    #[test]
+    fn limite_de_ia_avisa_uma_vez_por_janela() {
+        let config = Config::default();
+        let mut a = UsageAlerts::default();
+        let t = 1_000_000;
+        let reset = Some(t + 3600);
+        assert!(a.evaluate(t, &[usage("five_hour", 50.0, reset)], &config).is_empty());
+        let fired = a.evaluate(t + 10, &[usage("five_hour", 76.0, reset)], &config);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].title, "Claude: 75% do limite de 5 h");
+        assert_eq!(fired[0].target, Target::Usage);
+        assert!(fired[0].body.starts_with("Já usou 76,0% da janela. Renova em 59 min 50 s"), "{}", fired[0].body);
+        assert!(a.evaluate(t + 20, &[usage("five_hour", 80.0, reset)], &config).is_empty());
+        // Outra fonte lê a mesma janela com o reset uns segundos diferente: não repete.
+        assert!(a.evaluate(t + 30, &[usage("five_hour", 81.0, Some(t + 3605))], &config).is_empty());
+        // Pulou de 81 para 95: só o aviso de 90.
+        let fired = a.evaluate(t + 40, &[usage("five_hour", 95.0, reset)], &config);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].title, "Claude: 90% do limite de 5 h");
+        // Reabrir o app não repete.
+        let mut again = UsageAlerts::from_json(&a.to_json());
+        assert_eq!(again, a);
+        assert!(again.evaluate(t + 50, &[usage("five_hour", 95.0, reset)], &config).is_empty());
+        // Renovou (pelo relógio, sem leitura nova); a leitura velha não avisa de novo.
+        let fired = a.evaluate(t + 3601, &[usage("five_hour", 95.0, reset)], &config);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].title, "Claude: o limite de 5 h renovou");
+        assert!(a.evaluate(t + 3700, &[usage("five_hour", 95.0, reset)], &config).is_empty());
+        // Janela nova chegando a 75% avisa de novo.
+        let next = Some(t + 3600 + 5 * 3600);
+        assert!(a.evaluate(t + 3800, &[usage("five_hour", 10.0, next)], &config).is_empty());
+        assert_eq!(a.evaluate(t + 3900, &[usage("five_hour", 75.0, next)], &config).len(), 1);
+    }
+
+    #[test]
+    fn limite_de_ia_sem_aviso_de_renovacao_a_toa() {
+        let mut a = UsageAlerts::default();
+        let t = 1_000_000;
+        // A janela renovou sem ter avisado nada: não avisa a renovação.
+        a.evaluate(t, &[usage("five_hour", 30.0, Some(t + 60))], &Config::default());
+        assert!(a.evaluate(t + 61, &[], &Config::default()).is_empty());
+        // Renovação desligada: só os limiares.
+        let config = Config { usage_reset_enabled: false, ..Config::default() };
+        assert_eq!(a.evaluate(t + 100, &[usage("five_hour", 91.0, Some(t + 200))], &config).len(), 1);
+        assert!(a.evaluate(t + 201, &[], &config).is_empty());
+        // Desligado: nada.
+        let off = Config { usage_enabled: false, ..Config::default() };
+        assert!(UsageAlerts::default().evaluate(t, &[usage("five_hour", 99.0, None)], &off).is_empty());
     }
 
     #[test]
