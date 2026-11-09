@@ -6,7 +6,7 @@
 //! backoff_until (ms)}`. Janelas de outras contas do Claude têm `@slug` no id; as do
 //! Spark e da revisão de código do Codex têm `group`; nenhuma das duas entra aqui.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -31,16 +31,14 @@ impl Reading {
     }
 }
 
-fn dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("codenotch"))
-}
-
-pub fn read(provider: Provider) -> Reading {
+/// `dir`: `%APPDATA%\codenotch` ([`super::Paths::codenotch_dir`]). Sem o Codenotch,
+/// ou com o arquivo corrompido: leitura vazia.
+pub fn read(dir: Option<&Path>, provider: Provider) -> Reading {
     let file = match provider {
         Provider::Claude => "usage.json",
         Provider::Codex => "codex.json",
     };
-    dir().and_then(|d| super::read_json(&d.join(file))).map(|v| parse(provider, &v)).unwrap_or_default()
+    dir.and_then(|d| super::read_json(&d.join(file))).map(|v| parse(provider, &v)).unwrap_or_default()
 }
 
 fn ms(v: Option<&Value>) -> Option<i64> {
@@ -139,6 +137,25 @@ mod tests {
         // Leitura velha, mas em recuo: a rede espera.
         assert!(r.holds_network(1_800_000_000));
         assert!(!r.holds_network(1_800_000_700));
+    }
+
+    #[test]
+    fn sem_codenotch_ou_arquivo_estragado() {
+        let dir = std::env::temp_dir().join(format!("pm-ia codenotch ç-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(read(None, Provider::Claude), Reading::default());
+        assert_eq!(read(Some(&dir), Provider::Claude), Reading::default());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("usage.json"), "{\"windows\": [").unwrap();
+        assert_eq!(read(Some(&dir), Provider::Claude), Reading::default());
+        // Com BOM (gravado pelo PowerShell ou pelo Bloco de Notas): lê.
+        std::fs::write(
+            dir.join("codex.json"),
+            "\u{feff}{\"fetched_at\": 1800000000000, \"windows\": [{\"id\": \"primary\", \"used\": 0.5, \"duration_ms\": 18000000}]}",
+        )
+        .unwrap();
+        assert_eq!(read(Some(&dir), Provider::Codex).limits.unwrap().windows[0].used, 50.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

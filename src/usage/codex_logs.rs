@@ -1,7 +1,9 @@
-//! Rollouts do Codex CLI: `~/.codex/sessions/AAAA/MM/DD/rollout-*.jsonl`. Só existem
-//! para conversas locais (o app da loja com conversas na nuvem não grava aqui).
+//! Rollouts do Codex CLI: `<CODEX_HOME ou ~\.codex>\sessions\AAAA\MM\DD\rollout-*.jsonl`.
+//! Só existem para conversas locais (o app com conversas na nuvem não grava aqui).
 //!
-//! - `session_meta` dá a sessão e a pasta; `turn_context`, o modelo.
+//! - `session_meta` dá a sessão, a pasta e quem abriu (`originator`, `source`):
+//!   `exec`/`mcp` é automação (`codex exec`), `source.subagent` é subagente.
+//! - `turn_context` dá o modelo.
 //! - `event_msg` do tipo `token_count` dá os tokens da rodada (`info.last_token_usage`) e
 //!   os limites que o servidor informou nela (`rate_limits.primary/secondary`, com
 //!   `used_percent`, `window_minutes` e `resets_at` em segundos ou `resets_in_seconds`).
@@ -14,10 +16,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::claude_logs::{KEEP_SECS, collect, intern, read_from};
-use super::{Limits, Record, Source, Tokens, Window};
-
-const MAX_READ: u64 = 32 * 1024 * 1024;
+use super::claude_logs::{KEEP_SECS, MAX_READ, collect, intern, next_lines, recent_cutoff};
+use super::{Kind, Limits, Record, Source, Tokens, Window};
 
 #[derive(Default)]
 struct FileState {
@@ -25,6 +25,7 @@ struct FileState {
     session: Option<Arc<str>>,
     cwd: Option<Arc<str>>,
     model: Option<Arc<str>>,
+    kind: Kind,
     last_total: u64,
 }
 
@@ -49,9 +50,9 @@ impl Scanner {
     pub fn update(&mut self, root: &Path, now: i64) {
         let mut files = Vec::new();
         collect(root, 0, &mut files);
-        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(KEEP_SECS as u64);
+        let cutoff = recent_cutoff();
         for (path, len, modified) in files {
-            if !self.files.contains_key(&path) && modified.is_some_and(|m| m < cutoff) {
+            if !self.files.contains_key(&path) && modified.zip(cutoff).is_some_and(|(m, c)| m < c) {
                 continue;
             }
             let state = self.files.entry(path.clone()).or_default();
@@ -61,10 +62,11 @@ impl Scanner {
             if len == state.offset {
                 continue;
             }
-            let Some(chunk) = read_from(&path, state.offset, (len - state.offset).min(MAX_READ)) else { continue };
-            let Some(end) = chunk.iter().rposition(|b| *b == b'\n') else { continue };
-            state.offset += end as u64 + 1;
-            for line in chunk[..end].split(|b| *b == b'\n') {
+            let mut offset = state.offset;
+            let chunk = next_lines(&path, &mut offset, len, MAX_READ);
+            state.offset = offset;
+            let Some(chunk) = chunk else { continue };
+            for line in chunk.split(|b| *b == b'\n') {
                 let Some(v) = std::str::from_utf8(line).ok().and_then(|t| serde_json::from_str::<Value>(t.trim()).ok()) else {
                     continue;
                 };
@@ -97,6 +99,7 @@ fn parse_line(v: &Value, state: &mut FileState, names: &mut HashMap<String, Arc<
             if let Some(cwd) = text("cwd") {
                 state.cwd = Some(intern(names, cwd));
             }
+            state.kind = codex_kind(payload);
             (None, None)
         }
         Some("turn_context") => {
@@ -137,7 +140,30 @@ fn usage_record(payload: &Value, ts: i64, state: &mut FileState, names: &mut Has
         cache_read: cached,
     };
     let mut or_unknown = |v: &Option<Arc<str>>| v.clone().unwrap_or_else(|| intern(names, "?"));
-    Some(Record { ts, project: or_unknown(&state.cwd), session: or_unknown(&state.session), model: or_unknown(&state.model), tokens })
+    Some(Record {
+        ts,
+        project: or_unknown(&state.cwd),
+        session: or_unknown(&state.session),
+        model: or_unknown(&state.model),
+        kind: state.kind,
+        tokens,
+    })
+}
+
+/// Quem abriu a sessão do Codex: `source` é `"cli"`, `"vscode"`, `"exec"`, `"mcp"` ou
+/// `{"subagent": …}`; o `originator` (`codex_cli_rs`, `codex_exec`…) é o recuo.
+fn codex_kind(meta: &Value) -> Kind {
+    let source = meta.get("source");
+    if source.is_some_and(|s| s.get("subagent").is_some() || s.as_str().is_some_and(|t| t.eq_ignore_ascii_case("subagent"))) {
+        return Kind::Subagent;
+    }
+    let automated = |t: &str| {
+        let t = t.to_ascii_lowercase();
+        t == "exec" || t == "mcp" || t.ends_with("_exec") || t.ends_with("-exec")
+    };
+    let by_source = source.and_then(Value::as_str).is_some_and(automated);
+    let by_originator = meta.get("originator").and_then(Value::as_str).is_some_and(automated);
+    if by_source || by_originator { Kind::Automation } else { Kind::Interactive }
 }
 
 /// `rate_limits` de um `token_count`. Um balde que não é o `codex` (o Spark) fica de fora.
@@ -168,36 +194,45 @@ pub fn parse_limits(r: &Value, ts: i64) -> Option<Limits> {
     Some(l)
 }
 
-pub fn root() -> Option<PathBuf> {
-    super::codex_api::codex_home().map(|h| h.join("sessions"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::usage::{FIVE_HOUR, SEVEN_DAY};
 
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pm-ia codex {name} ção-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn now() -> i64 {
+        super::super::parse_time(&serde_json::json!("2026-11-09T12:00:00Z")).unwrap()
+    }
+
     #[test]
     fn rollout_do_codex_cli() {
-        let dir = std::env::temp_dir().join(format!("pm-codex-logs-{}", std::process::id()));
+        let dir = temp_dir("rollout");
         let day = dir.join("2026").join("11").join("09");
         std::fs::create_dir_all(&day).unwrap();
         let lines = [
-            r#"{"timestamp":"2026-11-09T10:00:00Z","type":"session_meta","payload":{"id":"sess-1","cwd":"D:\\Repos\\app"}}"#,
-            r#"{"timestamp":"2026-11-09T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5-codex","cwd":"D:\\Repos\\app"}}"#,
+            r#"{"timestamp":"2026-11-09T10:00:00Z","type":"session_meta","payload":{"id":"sess-1","cwd":"C:\\Users\\Usuário Teste\\Documentos\\Projeto Ação","originator":"codex_cli_rs","source":"cli"}}"#,
+            r#"{"timestamp":"2026-11-09T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5-codex","cwd":"C:\\Users\\Usuário Teste\\Documentos\\Projeto Ação"}}"#,
             r#"{"timestamp":"2026-11-09T10:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1500},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":500}},"rate_limits":{"primary":{"used_percent":12.5,"window_minutes":300,"resets_at":1800000000},"secondary":{"used_percent":3,"window_minutes":10080,"resets_in_seconds":600},"plan_type":"plus"}}}"#,
             // Repetido: não conta de novo.
             r#"{"timestamp":"2026-11-09T10:01:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1500},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":500}}}}"#,
             // Spark: limites de outro balde.
             r#"{"timestamp":"2026-11-09T10:02:00Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex_bengalfox","primary":{"used_percent":90,"window_minutes":300}}}}"#,
+            // Lixo no meio do arquivo.
+            r#"{"timestamp":"2026-11-09T10:03:00Z","type":"event_msg","payload":"#,
+            "\u{0}\u{1} não é JSON",
         ];
         std::fs::write(day.join("rollout-2026-11-09T10-00-00-sess-1.jsonl"), lines.join("\n") + "\n").unwrap();
-        let now = super::super::parse_time(&serde_json::json!("2026-11-09T12:00:00Z")).unwrap();
         let mut s = Scanner::default();
-        s.update(&dir, now);
+        s.update(&dir, now());
         assert_eq!(s.records().len(), 1);
         let r = &s.records()[0];
-        assert_eq!((&*r.project, &*r.session, &*r.model), (r"D:\Repos\app", "sess-1", "gpt-5-codex"));
+        assert_eq!((&*r.session, &*r.model, r.kind), ("sess-1", "gpt-5-codex", Kind::Interactive));
+        assert_eq!(super::super::project_name(&r.project), "Projeto Ação");
         assert_eq!((r.tokens.input, r.tokens.cache_read, r.tokens.output), (200, 800, 500));
         let l = s.limits().unwrap();
         assert_eq!(l.source, Source::CodexLog);
@@ -206,6 +241,30 @@ mod tests {
         assert_eq!(l.windows[1].id, SEVEN_DAY);
         assert_eq!(l.windows[1].resets_at, Some(l.fetched_at + 600));
         assert_eq!(l.plan.as_deref(), Some("plus"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quem_abriu_a_sessao() {
+        let kind = |meta: serde_json::Value| codex_kind(&meta);
+        assert_eq!(kind(serde_json::json!({"originator": "codex_cli_rs", "source": "cli"})), Kind::Interactive);
+        assert_eq!(kind(serde_json::json!({"originator": "codex_vscode", "source": "vscode"})), Kind::Interactive);
+        assert_eq!(kind(serde_json::json!({"originator": "codex_exec", "source": "exec"})), Kind::Automation);
+        assert_eq!(kind(serde_json::json!({"originator": "codex_exec"})), Kind::Automation);
+        assert_eq!(kind(serde_json::json!({"source": "mcp"})), Kind::Automation);
+        assert_eq!(kind(serde_json::json!({"source": {"subagent": "review"}})), Kind::Subagent);
+        // Formato antigo, sem nada disso.
+        assert_eq!(kind(serde_json::json!({"id": "x"})), Kind::Interactive);
+    }
+
+    #[test]
+    fn sem_pasta_ou_vazia() {
+        let dir = temp_dir("vazia");
+        let mut s = Scanner::default();
+        s.update(&dir, now());
+        std::fs::create_dir_all(&dir).unwrap();
+        s.update(&dir, now());
+        assert!(s.records().is_empty() && s.limits().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

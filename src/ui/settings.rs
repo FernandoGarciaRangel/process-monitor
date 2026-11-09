@@ -570,7 +570,7 @@ fn ai_section(app: &mut App, ui: &mut Ui) {
         ui.set_width(ui.available_width());
         for (title, text) in [
             ("Codenotch", "Se estiver aberto, os arquivos dele em %APPDATA%\\codenotch já trazem as janelas prontas. Com leitura recente dele, o Process Monitor não consulta a rede."),
-            ("Statusline do Claude Code", "O ~/.claude/statusline.js grava a % das janelas a cada resposta em %LOCALAPPDATA%\\Process Monitor\\claude-limits.json, sem nenhum segredo."),
+            ("Statusline do Claude Code", "Com o statusline-limits.js instalado (veja o README), o Claude Code grava a % das janelas a cada resposta em %LOCALAPPDATA%\\Process Monitor\\claude-limits.json, sem nenhum segredo."),
             ("Registros locais", "Os .jsonl do Claude Code e os rollouts do Codex CLI dão o consumo por projeto e sessão (e, no Codex CLI, a % de cada rodada)."),
         ] {
             row(ui, title, text, 0.0, |_| {});

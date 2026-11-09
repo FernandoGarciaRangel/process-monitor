@@ -11,7 +11,7 @@
 //!
 //! Formato e regras como os do Codenotch (github.com/vinzdg/codenotch, MIT).
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde_json::Value;
 
@@ -45,12 +45,8 @@ impl Credential {
     }
 }
 
-fn credentials_dir() -> Option<PathBuf> {
-    std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).or_else(|| super::home().map(|h| h.join(".claude")))
-}
-
-pub fn read_credential() -> Option<Credential> {
-    let dir = credentials_dir()?;
+/// `dir`: a pasta do Claude Code ([`super::Paths::claude_dir`]).
+pub fn read_credential(dir: &Path) -> Option<Credential> {
     [".credentials.json", "credentials.json"].iter().find_map(|name| parse_credential(&super::read_json(&dir.join(name))?))
 }
 
@@ -97,14 +93,14 @@ impl Error {
 }
 
 /// Uma leitura: credencial, requisição e, num 401, a releitura do arquivo.
-pub fn fetch(now: i64) -> Result<Limits, Error> {
-    let cred = read_credential().ok_or(Error::NoCredential)?;
+pub fn fetch(dir: &Path, now: i64) -> Result<Limits, Error> {
+    let cred = read_credential(dir).ok_or(Error::NoCredential)?;
     if cred.expired(now) {
         return Err(Error::Expired);
     }
     let plan = cred.plan.clone();
     let result = match request(&cred) {
-        Err(Error::Unauthorized) => match read_credential() {
+        Err(Error::Unauthorized) => match read_credential(dir) {
             Some(again) if !again.same(&cred) && !again.expired(now) => request(&again),
             _ => Err(Error::Unauthorized),
         },
@@ -222,5 +218,18 @@ mod tests {
         for e in [Error::Expired, Error::Unauthorized, Error::RateLimited(Some(5)), Error::Http(500)] {
             assert!(!e.describe().contains("SEGREDO"));
         }
+    }
+
+    #[test]
+    fn sem_claude_code_ou_credencial_estragada() {
+        let dir = std::env::temp_dir().join(format!("pm-ia claude ç-{}", std::process::id()));
+        assert_eq!(fetch(&dir, 0).unwrap_err(), Error::NoCredential);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".credentials.json"), "{\"claudeAiOauth\": ").unwrap();
+        assert_eq!(fetch(&dir, 0).unwrap_err(), Error::NoCredential);
+        // Vencida: não vai à rede.
+        std::fs::write(dir.join(".credentials.json"), "{\"claudeAiOauth\": {\"accessToken\": \"x\", \"expiresAt\": 1000}}").unwrap();
+        assert_eq!(fetch(&dir, 1_800_000_000).unwrap_err(), Error::Expired);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

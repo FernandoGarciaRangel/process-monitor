@@ -141,7 +141,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
             let edit = egui::TextEdit::multiline(&mut app.locks.input)
                 .id(input_id)
-                .hint_text(r"D:\Repos\projeto\target\release\app.exe")
+                .hint_text(r"C:\Projetos\app\target\release\app.exe")
                 .font(theme::mono(12.5))
                 .desired_rows(2)
                 .desired_width(f32::INFINITY);

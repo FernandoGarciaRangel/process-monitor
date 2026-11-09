@@ -12,7 +12,7 @@
 //! Formatos e regras como os do Codenotch (github.com/vinzdg/codenotch, MIT).
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -23,10 +23,6 @@ use crate::http::{self, Client};
 
 const URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const APP_SERVER_TIMEOUT: Duration = Duration::from_secs(20);
-
-pub fn codex_home() -> Option<PathBuf> {
-    std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| super::home().map(|h| h.join(".codex")))
-}
 
 /// Login do Codex. O `Debug` não mostra o token.
 pub struct Credential {
@@ -43,8 +39,9 @@ impl std::fmt::Debug for Credential {
     }
 }
 
-pub fn read_credential() -> Option<Credential> {
-    parse_credential(&super::read_json(&codex_home()?.join("auth.json"))?)
+/// `home`: `CODEX_HOME` ou `~\.codex` ([`super::Paths::codex_home`]).
+pub fn read_credential(home: &Path) -> Option<Credential> {
+    parse_credential(&super::read_json(&home.join("auth.json"))?)
 }
 
 pub fn parse_credential(v: &Value) -> Option<Credential> {
@@ -117,8 +114,8 @@ impl Error {
     }
 }
 
-pub fn fetch(now: i64) -> Result<Limits, Error> {
-    let cred = read_credential().ok_or(Error::NoCredential)?;
+pub fn fetch(home: &Path, now: i64) -> Result<Limits, Error> {
+    let cred = read_credential(home).ok_or(Error::NoCredential)?;
     if cred.expires_at.is_some_and(|e| e <= now) {
         return Err(Error::Expired);
     }
@@ -178,9 +175,9 @@ pub fn parse_usage(v: &Value, now: i64) -> Vec<Window> {
 
 /// O `codex.exe` nativo: o do app (`%LOCALAPPDATA%\OpenAI\Codex\bin\<versão>`), o do npm,
 /// o de `~/.codex/bin` ou um no PATH. Nada de `.cmd` nem de Node no meio.
-pub fn find_codex() -> Option<PathBuf> {
+pub fn find_codex(paths: &super::Paths) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+    if let Some(local) = &paths.local {
         let mut bins: Vec<PathBuf> = std::fs::read_dir(local.join(r"OpenAI\Codex\bin"))
             .into_iter()
             .flatten()
@@ -191,25 +188,25 @@ pub fn find_codex() -> Option<PathBuf> {
         bins.sort_by_key(|p| std::cmp::Reverse(std::fs::metadata(p).and_then(|m| m.modified()).ok()));
         candidates.extend(bins);
     }
-    if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+    if let Some(appdata) = &paths.roaming {
         let vendor = appdata.join(r"npm\node_modules\@openai\codex\vendor");
         for e in std::fs::read_dir(vendor).into_iter().flatten().flatten() {
             candidates.push(e.path().join(r"codex\codex.exe"));
         }
     }
-    if let Some(home) = codex_home() {
+    if let Some(home) = &paths.codex_home {
         candidates.push(home.join(r"bin\codex.exe"));
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        candidates.extend(std::env::split_paths(&path).map(|d| d.join("codex.exe")));
+    if let Some(path) = &paths.path_var {
+        candidates.extend(std::env::split_paths(path).map(|d| d.join("codex.exe")));
     }
     candidates.into_iter().find(|p| p.is_file())
 }
 
 /// Lê os limites pelo `codex app-server`. Só `initialize` e `account/rateLimits/read`:
 /// nenhum comando de login ou de modelo.
-pub fn read_app_server(now: i64) -> Option<Limits> {
-    let exe = find_codex()?;
+pub fn read_app_server(paths: &super::Paths, now: i64) -> Option<Limits> {
+    let exe = find_codex(paths)?;
     let mut command = Command::new(exe);
     command.arg("app-server").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     {
@@ -319,14 +316,31 @@ mod tests {
             "primary_window": {"used_percent": 25, "limit_window_seconds": 18000, "reset_at": 1_800_001_000},
             "secondary_window": {"used_percent": 10, "limit_window_seconds": 604800, "reset_after_seconds": 600}
         }, "additional_rate_limits": [{"limit_name": "Spark", "rate_limit": {"primary_window": {"used_percent": 99}}}]});
-        let ws = parse_usage(&v, 1_000);
+        let ws = parse_usage(&v, 1_800_000_000);
         assert_eq!(ws.len(), 2);
         assert_eq!((ws[0].id.as_str(), ws[0].resets_at), (FIVE_HOUR, Some(1_800_001_000)));
-        assert_eq!((ws[1].id.as_str(), ws[1].resets_at), (SEVEN_DAY, Some(1_600)));
+        assert_eq!((ws[1].id.as_str(), ws[1].resets_at), (SEVEN_DAY, Some(1_800_000_600)));
         // Plano grátis: primário de 30 dias, sem secundário.
         let free = serde_json::json!({"rate_limit": {"primary_window": {"used_percent": 16, "limit_window_seconds": 2_592_000}, "secondary_window": null}});
         assert_eq!(parse_usage(&free, 0)[0].id, "monthly");
         assert!(parse_usage(&serde_json::json!({"rate_limit": {"primary_window": {"used_percent": null}}}), 0).is_empty());
+    }
+
+    #[test]
+    fn sem_codex_instalado() {
+        let empty = crate::usage::Paths::from_env(|_| None, |_| None);
+        assert!(find_codex(&empty).is_none());
+        assert!(read_app_server(&empty, 0).is_none());
+        let dir = std::env::temp_dir().join(format!("pm-ia codex home ç-{}", std::process::id()));
+        assert!(read_credential(&dir).is_none());
+        assert_eq!(fetch(&dir, 0).unwrap_err(), Error::NoCredential);
+        // auth.json corrompido ou de outro formato: sem login, sem pânico.
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("auth.json"), "{\"OPENAI_API_KEY\": null, \"tokens\": 5}").unwrap();
+        assert!(read_credential(&dir).is_none());
+        std::fs::write(dir.join("auth.json"), "{\"tokens\": {\"access_token\": \"a.%%%.b\", \"account_id\": \"x\"}}").unwrap();
+        assert_eq!(read_credential(&dir).map(|c| c.expires_at), Some(None));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
