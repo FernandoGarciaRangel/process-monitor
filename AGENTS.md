@@ -228,6 +228,46 @@ Roda também com a janela na bandeja, porque os alertas dependem dela.
   "A internet voltou" depois de uma queda que avisou. Os dos processos ficam só na tela.
 - Conferir o que esta máquina devolve: `cargo test leitura_da_rede -- --ignored --nocapture`.
 
+## 🔴 Limites de IA (tela "IA")
+
+`src/usage/`, numa thread própria (`usage::Monitor`, rodada de 30 s), viva com a janela na
+bandeja porque os alertas dependem dela. Fontes, da mais barata para a mais cara, e a
+leitura mais nova ganha:
+
+1. **Codenotch** (`codenotch.rs`): `%APPDATA%\codenotch\usage.json` e `codex.json`. Leitura
+   dele com menos de 10 min, ou ele em recuo por 429 (`backoff_until`): **a rede não é
+   consultada**, porque os dois apps usam o mesmo token e dividiriam o limite de 429. No
+   Claude, `@slug` no id é outra conta (o `group` lá é o nome da conta e vem em todas as
+   janelas quando há mais de uma); no Codex, `group` é o Spark e fica de fora.
+2. **Statusline** (`bridge.rs`): o Claude Code manda `rate_limits` ao script da statusline;
+   `scripts/statusline-limits.js` grava só a % e o `resets_at` em
+   `%LOCALAPPDATA%\Process Monitor\claude-limits.json` (mesmo caminho no dev e no
+   instalado). O formato é contrato entre os dois. No `~/.claude/statusline.js`, a linha
+   `try { require(path.join(__dirname, 'statusline-limits.js'))(d.rate_limits); } catch (e) {}`.
+3. **Codex CLI** (`codex_logs.rs`): os `token_count` dos rollouts trazem a % de cada rodada.
+4. **Consulta própria**, desligada por padrão (Configurações → IA): `oauth/usage` do Claude
+   (`claude_api.rs`) e `wham/usage` do Codex, com o `codex app-server` de recuo
+   (`codex_api.rs`). Não são oficiais. Regras em `gate.rs`: piso de 5 min por provedor
+   (contando falhas), recuo `60 s × 2ⁿ` até 15 min, `Retry-After` só aumenta. O estado
+   (sem token) fica em `usage-state.json` e vale depois de reabrir.
+
+- 🔴 Token: só lido na hora da requisição. **Nunca** renovar (concorre com o Claude Code e
+  pode derrubar a sessão dele), gravar, logar ou pôr em mensagem de erro; o `Debug` das
+  credenciais esconde o token. Token vencido **não é enviado**: o `oauth/usage` responde a
+  ele com 429 e `Retry-After` de uma hora, não com 401.
+- O consumo (`claude_logs.rs`) só é lido com a tela aberta, aos pedaços (guarda até onde
+  leu cada arquivo), deduplicado por `message.id` + `requestId`. Não dá a %: ninguém
+  publica quantos tokens valem 100%. O ranking ordena por "tokens novos" (entrada, saída e
+  cache criado; o cache lido fica fora da soma).
+- Alertas (`alerts::UsageAlerts`, regra pura): 75% e 90% uma vez por janela (dois
+  `resets_at` a menos de 30 min são a mesma janela), e a renovação pelo relógio, só de
+  janela que chegou a avisar. O estado vai no `usage-state.json`: reabrir não repete.
+- "Sistema" e "IA" dividem a linha na barra lateral (`ui::usage::half_rect`): um item
+  inteiro a mais empurraria os cartões para fora da tela de 768 px.
+- A disciplina da consulta segue a do Codenotch (github.com/vinzdg/codenotch, MIT); o
+  crédito fica nos comentários e nas configurações.
+- Conferir o que esta máquina devolve, sem rede: `cargo test limites_ia -- --ignored --nocapture`.
+
 ## Quem está usando um arquivo
 
 `src/locks.rs` usa o Restart Manager (o mesmo do instalador): pega arquivos abertos

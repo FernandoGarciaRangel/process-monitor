@@ -22,6 +22,11 @@ permite finalizá-los.
   Abre no navegador e libera a porta finalizando o processo, com confirmação.
 - **Detalhes:** caminho, linha de comando, diretório de trabalho, portas em escuta,
   processo pai e filhos, início e tempo de execução.
+- **IA:** os limites do Claude e do Codex (janela de 5 h e semanal): a % usada, quando
+  renova, a previsão no ritmo atual e o que está gastando (projeto, sessão e modelo).
+  Avisa em 75% e 90% e quando renova. Lê o [Codenotch](https://github.com/vinzdg/codenotch),
+  se estiver aberto, a statusline do Claude Code e os registros locais; a consulta
+  própria aos servidores (não oficial) é opcional e vem desligada.
 - **Finalizar:** processo, árvore ou grupo, sempre com confirmação. Antes de finalizar,
   confere se o PID ainda é do mesmo processo; processos críticos do Windows ficam
   bloqueados. Sem administrador, processos do sistema não podem ser finalizados — o
@@ -56,6 +61,8 @@ administrador e cria atalhos na área de trabalho e no Menu Iniciar.
 | `src/sampler.rs` | Thread de coleta (sysinfo), histórico e árvore de processos |
 | `src/gpu.rs` | Uso de GPU pelos contadores de desempenho do Windows (PDH) e DXGI |
 | `src/ports.rs` | Portas em escuta (IP Helper), classificação e sondagem HTTP |
+| `src/usage/` | Limites e consumo do Claude e do Codex (thread `usage`) |
+| `scripts/statusline-limits.js` | Grava a % do Claude que a statusline do Claude Code recebe |
 | `src/platform.rs` | Win32: finalizar com verificação, elevação, ícones, descrição do arquivo |
 | `src/theme.rs` | Tokens visuais e configuração do egui |
 | `src/ui/` | Barra lateral, tabela de processos, detalhes e telas de desempenho |
