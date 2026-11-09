@@ -3,14 +3,14 @@
 
 use std::collections::HashSet;
 
-use egui::{Align, Color32, CornerRadius, Id, Layout, Rect, RichText, Sense, Ui, pos2, vec2};
+use egui::{Align, Align2, Color32, CornerRadius, Id, Layout, Rect, RichText, Sense, Ui, pos2, vec2};
 use egui_phosphor::regular as icon;
 
 use crate::app::App;
 use crate::format;
 use crate::theme::{self, ACCENT, INK, INK_2, INK_3, INK_4};
 use crate::ui::widgets::{self, ChartStyle, Layer};
-use crate::usage::{Consumption, Limits, Pace, Provider, ProviderState, Tokens, Window, now_secs};
+use crate::usage::{Consumption, Limits, Pace, Provider, ProviderState, Tokens, Window, now_secs, project_name, share};
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     let usage = app.usage_state.clone();
@@ -133,6 +133,12 @@ fn window_row(ui: &mut Ui, w: &Window, series: Option<&crate::sampler::Series>, 
             ui.label(RichText::new(pace).font(theme::regular(11.5)).color(color));
         }
     });
+    if !expired
+        && let Some(b) = crate::usage::budget(w, now)
+        && w.used < 99.95
+    {
+        budget_line(ui, &b);
+    }
     if main
         && let Some(series) = series.filter(|s| s.values().len() >= 2)
     {
@@ -141,6 +147,28 @@ fn window_row(ui: &mut Ui, w: &Window, series: Option<&crate::sampler::Series>, 
         widgets::chart(ui, size, &[Layer::area(series, ACCENT)], 100.0, ChartStyle::SPARK)
             .on_hover_text("Uso da janela nas últimas leituras (até 2 h)");
     }
+}
+
+/// "Para durar até renovar, use até 12% por dia", com o ritmo atual ao lado.
+fn budget_line(ui: &mut Ui, b: &crate::usage::Budget) {
+    let unit = b.unit.label();
+    let text = if b.last_stretch {
+        format!("Resta {} até renovar", format::percent(b.per_unit))
+    } else {
+        format!("Para durar até renovar, use até {} por {unit}", format::percent(b.per_unit))
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label(RichText::new(text).font(theme::regular(11.5)).color(INK_2));
+        if let Some(current) = b.current.filter(|_| !b.last_stretch) {
+            // Acima do orçamento (com folga de 5%), o ritmo atual acende.
+            let color = if current > b.per_unit * 1.05 { ACCENT } else { INK_3 };
+            ui.label(RichText::new("·").font(theme::regular(11.5)).color(INK_4));
+            ui.label(RichText::new(format!("ritmo atual {} por {unit}", format::percent(current))).font(theme::regular(11.5)).color(color));
+        }
+    })
+    .response
+    .on_hover_text("O que falta da janela dividido pelo tempo até ela renovar. O ritmo atual vem das últimas leituras.");
 }
 
 /// Laranja que acende com a carga, como as células de calor.
@@ -170,24 +198,28 @@ fn consumption_card(app: &mut App, ui: &mut Ui, usage: &crate::usage::Usage, now
             });
         });
         ui.add_space(8.0);
-        let state = usage.get(app.usage_provider);
+        let provider = app.usage_provider;
+        let state = usage.get(provider);
         let period = if app.usage_week { state.week.as_ref() } else { state.recent.as_ref() };
-        match (app.usage_provider, period) {
-            (_, Some(c)) => ranking(ui, app.usage_provider, c, now),
-            (Provider::Claude, None) if state.has_logs || !usage.scanned => {
-                muted(ui, "Lendo os registros do Claude Code…");
+        match (provider, period) {
+            (Provider::Claude, _) if !state.installed => muted(ui, "Claude Code não encontrado neste computador."),
+            (Provider::Claude, _) if !state.has_logs => {
+                muted(ui, "O Claude Code ainda não gravou conversas neste computador (pasta projects).")
             }
-            (Provider::Claude, None) => muted(ui, "Nenhum registro do Claude Code em ~/.claude/projects."),
+            (_, Some(c)) => consumption(ui, provider, c, now),
+            (Provider::Claude, None) if !usage.scanned => muted(ui, "Lendo os registros do Claude Code…"),
+            (Provider::Claude, None) => muted(ui, "Nada lido ainda."),
+            (Provider::Codex, None) if !state.installed => muted(ui, "Codex não encontrado neste computador."),
             (Provider::Codex, None) => muted(
                 ui,
-                "O Codex CLI não gravou conversas nesta máquina (~/.codex/sessions). As conversas do app do Codex ficam na \
-                 nuvem e não dizem o consumo por projeto.",
+                "O Codex CLI não gravou conversas neste computador (pasta sessions do Codex). As conversas do app do Codex \
+                 ficam na nuvem e não dizem o consumo por projeto.",
             ),
         }
     });
 }
 
-fn ranking(ui: &mut Ui, provider: Provider, c: &Consumption, now: i64) {
+fn consumption(ui: &mut Ui, provider: Provider, c: &Consumption, now: i64) {
     let since = if c.aligned {
         format!("Desde {} (início da janela atual)", moment(c.since, now))
     } else {
@@ -202,87 +234,229 @@ fn ranking(ui: &mut Ui, provider: Provider, c: &Consumption, now: i64) {
         "Tokens novos: entrada, saída e cache criado. O cache lido fica de fora da soma: é barato e dominaria o \
          total. A Anthropic e a OpenAI não publicam quanto cada tipo pesa no limite.",
     );
-    ui.add_space(6.0);
-    if c.projects.is_empty() {
+    if c.total.requests == 0 {
+        ui.add_space(6.0);
         muted(ui, "Nada neste período.");
         return;
     }
+    ui.add_space(12.0);
+    ui.columns(2, |cols| {
+        kinds(&mut cols[0], c);
+        models(&mut cols[1], c);
+    });
+    ui.add_space(14.0);
+    top_sessions(ui, c, now);
+    ui.add_space(14.0);
+    projects(ui, provider, c, now);
+}
+
+/// Cores das três origens: o laranja da marca em três intensidades (nenhuma cor de recurso).
+const KIND_COLORS: [Color32; 3] = [ACCENT, Color32::from_rgb(0xB0, 0x3A, 0x14), Color32::from_rgb(0x6A, 0x2A, 0x14)];
+
+fn kinds(ui: &mut Ui, c: &Consumption) {
+    section(ui, "Quem gastou");
+    let total = c.total.fresh();
+    // Uma barra só, dividida pelas três origens.
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(4), theme::WELL);
+    let mut x = rect.left();
+    for ((_, t), color) in c.kinds.iter().zip(KIND_COLORS) {
+        let w = rect.width() * share(t.fresh(), total) / 100.0;
+        if w >= 0.5 {
+            let seg = Rect::from_min_max(pos2(x, rect.top()), pos2((x + w).min(rect.right()), rect.bottom()));
+            ui.painter().rect_filled(seg, CornerRadius::same(4), color);
+            x += w;
+        }
+    }
+    ui.add_space(6.0);
+    let tip = [
+        "Conversas abertas por uma pessoa: o terminal, o app de desktop ou a extensão do editor.",
+        "claude -p, SDK (TypeScript, Python) e scripts que chamam o Claude Code sem ninguém digitando. No Codex, o codex exec.",
+        "Agentes que outra sessão abriu para uma tarefa (Task, revisão). Contam aqui, não na sessão que os chamou.",
+    ];
+    for (((kind, t), color), tip) in c.kinds.iter().zip(KIND_COLORS).zip(tip) {
+        value_row(ui, color, kind.label(), t, total).on_hover_text(tip);
+    }
+}
+
+fn models(ui: &mut Ui, c: &Consumption) {
+    section(ui, "Peso de cada modelo");
+    let total = c.total.fresh();
+    for (i, (family, t)) in c.models.iter().take(6).enumerate() {
+        let color = ACCENT.gamma_multiply((1.0 - i as f32 * 0.16).max(0.3));
+        value_row(ui, color, family, t, total);
+        widgets::meter(ui, share(t.fresh(), total) / 100.0, color, 4.0);
+        ui.add_space(2.0);
+    }
+    if c.models.len() > 6 {
+        muted(ui, &format!("E mais {} modelos.", c.models.len() - 6));
+    }
+}
+
+/// Bolinha, nome à esquerda; tokens e % à direita, alinhados.
+fn value_row(ui: &mut Ui, color: Color32, label: &str, t: &Tokens, total: u64) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+    let p = ui.painter();
+    p.circle_filled(pos2(rect.left() + 4.0, rect.center().y), 4.0, color);
+    let pct = format!("{:>5}", format::percent(share(t.fresh(), total)));
+    let right = p.text(pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, pct, theme::semibold(12.5), INK);
+    let tok = p.text(
+        pos2(right.left() - 10.0, rect.center().y),
+        Align2::RIGHT_CENTER,
+        format!("{} tokens", tokens(t.fresh())),
+        theme::regular(12.0),
+        INK_3,
+    );
+    let name_rect = Rect::from_min_max(pos2(rect.left() + 14.0, rect.top()), pos2(tok.left() - 8.0, rect.bottom()));
+    paint_truncated(ui, name_rect, label, theme::regular(12.5), INK_2);
+    response
+}
+
+fn top_sessions(ui: &mut Ui, c: &Consumption, now: i64) {
+    section(ui, "Sessões mais pesadas");
+    let total = c.total.fresh();
+    for (i, t) in c.top.iter().enumerate() {
+        let s = &t.session;
+        let row = ui.horizontal(|ui| {
+            ui.set_min_height(26.0);
+            ui.label(RichText::new(format!("{}", i + 1)).font(theme::semibold(12.5)).color(INK_4));
+            let button_w = 30.0;
+            let text_w = (ui.available_width() - button_w - 8.0).max(80.0);
+            let (rect, _) = ui.allocate_exact_size(vec2(text_w, 26.0), Sense::hover());
+            let span = format!(
+                "{}–{} ({})",
+                moment(s.first, now),
+                moment(s.last, now),
+                short_duration(s.last.saturating_sub(s.first))
+            );
+            let right = format!("{} tokens · {}", tokens(s.tokens.fresh()), format::percent(share(s.tokens.fresh(), total)));
+            let p = ui.painter();
+            let r = p.text(pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, right, theme::regular(12.0), INK_2);
+            let mid = format!("{span} · {}", crate::usage::model_family(&s.model));
+            let m = p.text(pos2(r.left() - 14.0, rect.center().y), Align2::RIGHT_CENTER, mid, theme::regular(12.0), INK_3);
+            let name = Rect::from_min_max(rect.left_top(), pos2(m.left() - 10.0, rect.bottom()));
+            paint_truncated(ui, name, project_name(&t.project), theme::semibold(12.5), INK);
+            let (tip, enabled) = if t.folder_exists {
+                (format!("Abrir a pasta do projeto\n{}", t.project), true)
+            } else {
+                (format!("A pasta não existe mais neste computador\n{}", t.project), false)
+            };
+            let open = ui
+                .add_enabled(enabled, egui::Button::new(RichText::new(icon::FOLDER_OPEN).font(theme::regular(14.0))).min_size(vec2(button_w, 24.0)))
+                .on_hover_text(&tip)
+                .on_disabled_hover_text(&tip);
+            if open.clicked() {
+                crate::platform::shell_open(&t.project);
+            }
+        });
+        row.response.on_hover_text(format!("Sessão {}\nModelo: {}", s.id, s.model));
+    }
+}
+
+/// Larguras da tabela: o nome fica com o que sobra; os números, colunas fixas, mais
+/// estreitas em janela pequena.
+fn columns_for(width: f32) -> (f32, f32) {
+    let num = if width >= 760.0 { 92.0 } else { 76.0 };
+    let name = (width - num * 5.0).max(120.0);
+    (name, num)
+}
+
+fn projects(ui: &mut Ui, provider: Provider, c: &Consumption, now: i64) {
+    section(ui, "Por projeto");
     let expanded_id = Id::new(("usage_expanded", provider.key()));
     let mut expanded: HashSet<String> = ui.data(|d| d.get_temp(expanded_id)).unwrap_or_default();
     let cache_cols = provider == Provider::Claude;
-    egui::Grid::new(("usage_ranking", provider.key())).num_columns(6).spacing(vec2(14.0, 6.0)).striped(false).show(
-        ui,
-        |ui| {
-            for h in ["Projeto", "Respostas", "Entrada", if cache_cols { "Cache criado" } else { "" }, "Cache lido", "Saída"] {
-                ui.label(RichText::new(h).font(theme::semibold(11.5)).color(INK_3));
+    let (name_w, num_w) = columns_for(ui.available_width());
+    let headers = ["Respostas", "Entrada", if cache_cols { "Cache criado" } else { "" }, "Cache lido", "Saída"];
+    table_row(ui, name_w, num_w, ("Projeto", theme::semibold(11.5), INK_3), &headers.map(|h| (h.to_owned(), None)), INK_3, false);
+    crate::app::hairline(ui);
+    for p in c.projects.iter().take(30) {
+        let open = expanded.contains(&p.path);
+        let caret = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
+        let name = format!("{caret}  {}", p.name());
+        let response = table_row(ui, name_w, num_w, (&name, theme::semibold(12.5), INK), &cells(&p.tokens, cache_cols), INK, true);
+        let models: Vec<String> = p.models.iter().map(|(m, t)| format!("{m}: {} tokens novos", tokens(t.fresh()))).collect();
+        if response.on_hover_text(format!("{}\n\n{}", p.path, models.join("\n"))).clicked() {
+            if open {
+                expanded.remove(&p.path);
+            } else {
+                expanded.insert(p.path.clone());
             }
-            ui.end_row();
-            let name_width = 260.0;
-            for p in c.projects.iter().take(30) {
-                let open = expanded.contains(&p.path);
-                let caret = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
-                let response = truncated(ui, &format!("{caret}  {}", p.name()), name_width, INK, theme::semibold(12.5));
-                let models: Vec<String> = p.models.iter().map(|(m, t)| format!("{m}: {} tokens novos", tokens(t.fresh()))).collect();
-                let response = response.on_hover_text(format!("{}\n\n{}", p.path, models.join("\n")));
-                if response.clicked() {
-                    if open {
-                        expanded.remove(&p.path);
-                    } else {
-                        expanded.insert(p.path.clone());
-                    }
-                }
-                numbers(ui, &p.tokens, cache_cols, INK);
-                ui.end_row();
-                if open {
-                    for s in p.sessions.iter().take(20) {
-                        let short: String = s.id.chars().take(8).collect();
-                        let span = format!("{}–{}", moment(s.first, now), moment(s.last, now));
-                        let text = format!("      {short} · {span} · {}", s.model);
-                        truncated(ui, &text, name_width, INK_2, theme::regular(12.0)).on_hover_text(format!("Sessão {}", s.id));
-                        numbers(ui, &s.tokens, cache_cols, INK_2);
-                        ui.end_row();
-                    }
-                }
+        }
+        if open {
+            for s in p.sessions.iter().take(20) {
+                let short: String = s.id.chars().take(8).collect();
+                let text = format!("      {short} · {}–{} · {}", moment(s.first, now), moment(s.last, now), crate::usage::model_family(&s.model));
+                table_row(ui, name_w, num_w, (&text, theme::regular(12.0), INK_2), &cells(&s.tokens, cache_cols), INK_2, false)
+                    .on_hover_text(format!("Sessão {}\nModelo: {}", s.id, s.model));
             }
-        },
-    );
+        }
+    }
     if c.projects.len() > 30 {
         muted(ui, &format!("E mais {} projetos com menos consumo.", c.projects.len() - 30));
     }
     ui.data_mut(|d| d.insert_temp(expanded_id, expanded));
 }
 
-fn numbers(ui: &mut Ui, t: &Tokens, cache_cols: bool, color: Color32) {
-    let cell = |ui: &mut Ui, text: String| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(text).font(theme::regular(12.5)).color(color));
-        });
-    };
-    cell(ui, t.requests.to_string());
-    cell(ui, tokens(t.input));
-    if cache_cols {
-        let created = tokens(t.cache_create());
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            ui.label(RichText::new(created).font(theme::regular(12.5)).color(color))
-                .on_hover_text(format!("5 min: {} · 1 h: {}", tokens(t.cache_create_5m), tokens(t.cache_create_1h)));
-        });
+/// Textos das colunas numéricas, com a dica do cache criado (5 min e 1 h).
+fn cells(t: &Tokens, cache_cols: bool) -> [(String, Option<String>); 5] {
+    let created = if cache_cols {
+        (tokens(t.cache_create()), Some(format!("Cache de 5 min: {} · de 1 h: {}", tokens(t.cache_create_5m), tokens(t.cache_create_1h))))
     } else {
-        ui.label("");
-    }
-    cell(ui, tokens(t.cache_read));
-    cell(ui, tokens(t.output));
+        ("—".to_owned(), None)
+    };
+    [(t.requests.to_string(), None), (tokens(t.input), None), created, (tokens(t.cache_read), None), (tokens(t.output), None)]
 }
 
-/// Texto numa linha, cortado com reticências, clicável.
-fn truncated(ui: &mut Ui, text: &str, width: f32, color: Color32, font: egui::FontId) -> egui::Response {
+/// Uma linha da tabela em colunas fixas: o nome à esquerda, cortado com reticências, e
+/// cada número alinhado à direita da coluna dele (o cabeçalho também), para as colunas
+/// ficarem retas.
+fn table_row(
+    ui: &mut Ui,
+    name_w: f32,
+    num_w: f32,
+    name: (&str, egui::FontId, Color32),
+    numbers: &[(String, Option<String>); 5],
+    color: Color32,
+    clickable: bool,
+) -> egui::Response {
+    let height = 24.0;
+    let sense = if clickable { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(vec2(name_w + num_w * 5.0, height), sense);
+    if clickable && response.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(theme::R_SM), theme::GRAPHITE_2);
+    }
+    let name_rect = Rect::from_min_size(rect.left_top() + vec2(4.0, 0.0), vec2(name_w - 12.0, height));
+    paint_truncated(ui, name_rect, name.0, name.1, name.2);
+    let header = color == INK_3;
+    let font = if header { theme::semibold(11.5) } else { theme::regular(12.5) };
+    for (i, (text, tip)) in numbers.iter().enumerate() {
+        let cell = Rect::from_min_size(pos2(rect.left() + name_w + num_w * i as f32, rect.top()), vec2(num_w, height));
+        ui.painter().text(pos2(cell.right() - 6.0, cell.center().y), Align2::RIGHT_CENTER, text, font.clone(), color);
+        if let Some(tip) = tip {
+            ui.interact(cell, ui.id().with(("usage_cell", rect.top() as i64, i)), Sense::hover()).on_hover_text(tip);
+        }
+    }
+    if clickable { response.on_hover_cursor(egui::CursorIcon::PointingHand) } else { response }
+}
+
+/// Texto numa linha dentro de `rect`, cortado com reticências.
+fn paint_truncated(ui: &Ui, rect: Rect, text: &str, font: egui::FontId, color: Color32) {
+    if rect.width() < 8.0 {
+        return;
+    }
     let galley = ui.fonts_mut(|f| {
         let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
-        job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width());
         f.layout_job(job)
     });
-    let (rect, response) = ui.allocate_exact_size(vec2(width, galley.size().y), Sense::click());
-    ui.painter().galley(rect.left_top(), galley, color);
-    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    let y = rect.center().y - galley.size().y / 2.0;
+    ui.painter().galley(pos2(rect.left(), y), galley, color);
+}
+
+fn section(ui: &mut Ui, text: &str) {
+    widgets::section_label(ui, text);
+    ui.add_space(4.0);
 }
 
 fn chip(ui: &mut Ui, selected: bool, text: &str) -> egui::Response {
