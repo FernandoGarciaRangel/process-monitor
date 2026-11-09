@@ -5,7 +5,6 @@
 //! `/releases/tag/vX.Y.Z`), sem API nem JSON. O instalador segue o nome que o
 //! `package.ps1` gera: `ProcessMonitor-Setup-X.Y.Z.exe`.
 
-use std::ffi::c_void;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::Write;
@@ -14,13 +13,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Networking::WinHttp::{
-    INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_REDIRECT_POLICY,
-    WINHTTP_OPTION_REDIRECT_POLICY_NEVER, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_LOCATION,
-    WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
-};
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::Win32::Networking::WinHttp::{WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_LOCATION};
+
+use crate::http::Client;
 
 pub const REPO: &str = "FernandoGarciaRangel/process-monitor";
 /// Espera antes da primeira verificação, para não disputar a abertura com a coleta.
@@ -153,7 +148,7 @@ fn run(ctx: egui::Context, latest: Arc<Mutex<Arc<State>>>, rx: Receiver<Msg>, mu
 
 /// `Some` com o instalador baixado se houver versão mais nova que a deste executável.
 fn check_and_download(dir: &Path, publish: &dyn Fn(State)) -> Result<Option<(Version, PathBuf)>, String> {
-    let client = Client::new()?;
+    let client = Client::new([10_000, 10_000, 30_000, 30_000]).map_err(github)?;
     let version = latest_version(&client)?;
     if version <= Version::current() {
         return Ok(None);
@@ -163,7 +158,7 @@ fn check_and_download(dir: &Path, publish: &dyn Fn(State)) -> Result<Option<(Ver
 }
 
 fn latest_version(client: &Client) -> Result<Version, String> {
-    let response = client.get(&format!("https://github.com/{REPO}/releases/latest"), false)?;
+    let response = client.get(&format!("https://github.com/{REPO}/releases/latest"), false).map_err(github)?;
     match response.status {
         301 | 302 | 303 | 307 | 308 => {}
         404 => return Err("nenhuma versão publicada no GitHub".to_owned()),
@@ -185,7 +180,7 @@ fn installer_name(version: Version) -> String {
 
 fn download(client: &Client, version: Version, dir: &Path, publish: &dyn Fn(State)) -> Result<PathBuf, String> {
     let name = installer_name(version);
-    let response = client.get(&format!("https://github.com/{REPO}/releases/download/v{version}/{name}"), true)?;
+    let response = client.get(&format!("https://github.com/{REPO}/releases/download/v{version}/{name}"), true).map_err(github)?;
     if response.status != 200 {
         return Err(format!("o download do instalador respondeu {}", response.status));
     }
@@ -219,7 +214,7 @@ fn download(client: &Client, version: Version, dir: &Path, publish: &dyn Fn(Stat
             publish(State::Downloading { version, received, total });
         }
         Ok(())
-    });
+    }).map_err(github);
     drop(file);
     let check = result.and_then(|()| {
         if total.is_some_and(|t| t != received) {
@@ -279,124 +274,9 @@ fn remove_old_installers(dir: &Path) {
     }
 }
 
-/// Handle do WinHTTP, fechado ao sair de escopo.
-struct Handle(*mut c_void);
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe {
-                let _ = WinHttpCloseHandle(self.0);
-            }
-        }
-    }
-}
-
-fn handle(raw: *mut c_void) -> Result<Handle, String> {
-    if raw.is_null() { Err(describe(windows::core::Error::from_thread())) } else { Ok(Handle(raw)) }
-}
-
-/// WinHTTP: HTTPS do próprio Windows, com o proxy do sistema, sem dependência nova.
-struct Client {
-    session: Handle,
-}
-
-struct Response<'a> {
-    // Ordem de declaração = ordem de fechamento: a requisição antes da conexão.
-    request: Handle,
-    _connect: Handle,
-    _client: std::marker::PhantomData<&'a Client>,
-    status: u32,
-}
-
-impl Client {
-    fn new() -> Result<Self, String> {
-        let agent = HSTRING::from(format!("ProcessMonitor/{}", Version::current()));
-        let session =
-            handle(unsafe { WinHttpOpen(&agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0) })?;
-        unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000) }.map_err(describe)?;
-        Ok(Self { session })
-    }
-
-    /// GET em `https://host/caminho`. Sem `follow`, um redirecionamento volta como
-    /// resposta (para ler o `Location`).
-    fn get(&self, url: &str, follow: bool) -> Result<Response<'_>, String> {
-        let rest = url.strip_prefix("https://").ok_or("só HTTPS")?;
-        let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-        unsafe {
-            let connect = handle(WinHttpConnect(self.session.0, &HSTRING::from(host), INTERNET_DEFAULT_HTTPS_PORT, 0))?;
-            let request = handle(WinHttpOpenRequest(
-                connect.0,
-                w!("GET"),
-                &HSTRING::from(path),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                std::ptr::null(),
-                WINHTTP_FLAG_SECURE,
-            ))?;
-            if !follow {
-                let policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_ne_bytes();
-                WinHttpSetOption(Some(request.0), WINHTTP_OPTION_REDIRECT_POLICY, Some(&policy)).map_err(describe)?;
-            }
-            WinHttpSendRequest(request.0, None, None, 0, 0, 0).map_err(describe)?;
-            WinHttpReceiveResponse(request.0, std::ptr::null_mut()).map_err(describe)?;
-            let mut response = Response { request, _connect: connect, _client: std::marker::PhantomData, status: 0 };
-            response.status = response.number(WINHTTP_QUERY_STATUS_CODE).ok_or("resposta sem código HTTP")?;
-            Ok(response)
-        }
-    }
-}
-
-impl Response<'_> {
-    fn number(&self, query: u32) -> Option<u32> {
-        let mut value = 0u32;
-        let mut len = size_of::<u32>() as u32;
-        unsafe {
-            WinHttpQueryHeaders(
-                self.request.0,
-                query | WINHTTP_QUERY_FLAG_NUMBER,
-                PCWSTR::null(),
-                Some((&raw mut value).cast()),
-                &mut len,
-                std::ptr::null_mut(),
-            )
-        }
-        .ok()?;
-        Some(value)
-    }
-
-    fn header(&self, query: u32) -> Option<String> {
-        let mut buf = vec![0u16; 2048];
-        let mut len = (buf.len() * 2) as u32;
-        unsafe {
-            WinHttpQueryHeaders(self.request.0, query, PCWSTR::null(), Some(buf.as_mut_ptr().cast()), &mut len, std::ptr::null_mut())
-        }
-        .ok()?;
-        Some(String::from_utf16_lossy(&buf[..len as usize / 2]))
-    }
-
-    fn read_each(&self, mut f: impl FnMut(&[u8]) -> Result<(), String>) -> Result<(), String> {
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            let mut read = 0u32;
-            unsafe { WinHttpReadData(self.request.0, buf.as_mut_ptr().cast(), buf.len() as u32, &mut read) }.map_err(describe)?;
-            if read == 0 {
-                return Ok(());
-            }
-            f(&buf[..read as usize])?;
-        }
-    }
-}
-
-/// Os erros do WinHTTP não têm texto no FormatMessage do sistema: os comuns em português.
-fn describe(e: windows::core::Error) -> String {
-    match e.code().0 as u32 & 0xFFFF {
-        12002 => "o GitHub não respondeu a tempo".to_owned(),
-        12007 | 12029 => "sem conexão com o GitHub".to_owned(),
-        12030 | 12031 => "a conexão caiu".to_owned(),
-        12175 | 12038 | 12044 | 12045 => "falha no certificado HTTPS".to_owned(),
-        code => format!("erro de rede {code}"),
-    }
+/// As mensagens do `http` falam de "servidor"; aqui o servidor é sempre o GitHub.
+fn github(e: String) -> String {
+    e.replace("o servidor", "o GitHub")
 }
 
 #[cfg(test)]
@@ -424,7 +304,7 @@ mod tests {
     #[test]
     #[ignore]
     fn winhttp_against_github() {
-        let client = Client::new().unwrap();
+        let client = Client::new([10_000, 10_000, 30_000, 30_000]).unwrap();
         let latest = client.get("https://github.com/BurntSushi/ripgrep/releases/latest", false).unwrap();
         assert_eq!(latest.status, 302);
         let location = latest.header(WINHTTP_QUERY_LOCATION).unwrap();

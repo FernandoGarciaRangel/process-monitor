@@ -10,6 +10,7 @@ mod export;
 mod format;
 mod gpu;
 mod health;
+mod http;
 mod icons;
 mod locks;
 mod netcheck;
