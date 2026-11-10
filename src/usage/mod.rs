@@ -160,6 +160,17 @@ impl Window {
     pub fn expired(&self, now: i64) -> bool {
         self.resets_at.is_some_and(|r| r <= now)
     }
+
+    /// 5 h e semanal: as janelas que todo plano tem.
+    pub fn is_main(&self) -> bool {
+        matches!(self.id.as_str(), FIVE_HOUR | SEVEN_DAY)
+    }
+
+    /// Tem uso que aparece na tela (`format::percent` mostra "0%" abaixo de 0,05) numa
+    /// leitura que ainda vale.
+    pub fn has_use(&self, now: i64) -> bool {
+        !self.expired(now) && self.used >= 0.05
+    }
 }
 
 pub fn window_label(id: &str, duration_secs: Option<i64>) -> String {
@@ -241,6 +252,14 @@ impl Limits {
             _ => 2,
         };
         self.windows.sort_by_key(rank);
+    }
+
+    /// Janelas da tela: 5 h e semanal sempre; as extras (semanal por modelo, Opus,
+    /// Sonnet) só com uso, porque em 0% ou já renovadas não dizem nada. Sem nenhuma das
+    /// principais (Codex grátis, só com a mensal), todas ficam: senão o cartão sairia vazio.
+    pub fn shown(&self, now: i64) -> impl Iterator<Item = &Window> {
+        let has_main = self.windows.iter().any(Window::is_main);
+        self.windows.iter().filter(move |w| !has_main || w.is_main() || w.has_use(now))
     }
 
     /// O maior uso entre as janelas que ainda valem, para o contador da barra lateral.
@@ -845,6 +864,33 @@ mod tests {
         assert_eq!(l.peak(T + 2_500), Some(61.5));
         // JSON de outra versão, sem campos: não é leitura.
         assert_eq!(Limits::from_json(&serde_json::json!({"windows": "x"})), None);
+    }
+
+    #[test]
+    fn janelas_extras_so_com_uso() {
+        let l = |windows: Vec<Window>| Limits { windows, source: Source::Codenotch, fetched_at: T, plan: None };
+        let ids = |l: &Limits, now: i64| l.shown(now).map(|w| w.id.clone()).collect::<Vec<_>>();
+        let reading = l(vec![
+            Window::new(FIVE_HOUR, 0.0, Some(T + 3600), Some(FIVE_HOURS_SECS)),
+            Window::new(SEVEN_DAY, 0.0, Some(T + 86_400), Some(SEVEN_DAYS_SECS)),
+            // weekly_scoped do Codenotch em 0%: a linha "Semanal (por modelo)" some.
+            Window::new(&claude_window_id("weekly_scoped"), 0.0, Some(T + 86_400), Some(SEVEN_DAYS_SECS)),
+            // Abaixo do que a tela mostra como "0,1%": também é zero.
+            Window::new("seven_day_sonnet", 0.04, Some(T + 86_400), Some(SEVEN_DAYS_SECS)),
+            Window::new(&claude_window_id("weekly_opus"), 12.0, Some(T + 2 * 86_400), Some(SEVEN_DAYS_SECS)),
+            // Sem dado que preste (NaN vira 0).
+            Window::new("seven_day_extra", f32::NAN, None, None),
+        ]);
+        // As principais ficam mesmo em 0%; das extras, só a que tem uso.
+        assert_eq!(ids(&reading, T), [FIVE_HOUR, SEVEN_DAY, "seven_day_opus"]);
+        // A do Opus renovou e ainda não veio leitura nova: some também.
+        assert_eq!(ids(&reading, T + 3 * 86_400), [FIVE_HOUR, SEVEN_DAY]);
+        // Uso pequeno, mas visível: aparece.
+        let small = l(vec![Window::new(FIVE_HOUR, 5.0, None, None), Window::new("seven_day_scoped", 0.1, None, None)]);
+        assert_eq!(ids(&small, T), [FIVE_HOUR, "seven_day_scoped"]);
+        // Sem 5 h nem semanal (Codex grátis, só a mensal): a janela que existe fica.
+        let monthly = l(vec![Window::new("monthly", 0.0, Some(T + 86_400), Some(30 * 86_400))]);
+        assert_eq!(ids(&monthly, T), ["monthly"]);
     }
 
     #[test]
