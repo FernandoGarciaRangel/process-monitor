@@ -73,7 +73,7 @@ fn provider_card(ui: &mut Ui, provider: Provider, state: &ProviderState, now: i6
         ui.add_space(8.0);
         match &state.limits {
             Some(limits) => {
-                for (i, w) in limits.windows.iter().enumerate() {
+                for (i, w) in limits.shown(now).enumerate() {
                     if i > 0 {
                         ui.add_space(10.0);
                     }
@@ -100,7 +100,7 @@ fn source_line(l: &Limits, now: i64) -> String {
 
 fn window_row(ui: &mut Ui, w: &Window, series: Option<&crate::sampler::Series>, now: i64) {
     let expired = w.expired(now);
-    let main = matches!(w.id.as_str(), crate::usage::FIVE_HOUR | crate::usage::SEVEN_DAY);
+    let main = w.is_main();
     let title = capitalize(&w.label());
     ui.horizontal(|ui| {
         ui.label(RichText::new(title).font(theme::semibold(if main { 13.0 } else { 12.0 })).color(INK_2));
@@ -353,12 +353,48 @@ fn top_sessions(ui: &mut Ui, c: &Consumption, now: i64) {
     }
 }
 
-/// Larguras da tabela: o nome fica com o que sobra; os números, colunas fixas, mais
-/// estreitas em janela pequena.
-fn columns_for(width: f32) -> (f32, f32) {
-    let num = if width >= 760.0 { 92.0 } else { 76.0 };
-    let name = (width - num * 5.0).max(120.0);
-    (name, num)
+/// Colunas numéricas da tabela de projetos.
+const NUM_COLS: usize = 5;
+/// Folga entre o número e a borda direita da coluna.
+const CELL_PAD: f32 = 6.0;
+
+/// Larguras da tabela, calculadas uma vez por quadro e usadas pelo cabeçalho e por todas
+/// as linhas: é o que mantém cada número sob o título dele. Os números crescem com a
+/// janela até um teto, e o nome também: numa tela de 2560 px, o nome com toda a sobra
+/// deixava a "Saída" a quase 2000 px do projeto. A tabela fica à esquerda, e o resto do
+/// cartão, vazio.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Columns {
+    name: f32,
+    num: f32,
+}
+
+impl Columns {
+    const NUM_MIN: f32 = 76.0;
+    const NUM_MAX: f32 = 120.0;
+    const NAME_MIN: f32 = 120.0;
+    const NAME_MAX: f32 = 520.0;
+
+    fn new(width: f32) -> Self {
+        let width = width.max(0.0).floor();
+        let mut num = (width * 0.1).clamp(Self::NUM_MIN, Self::NUM_MAX).floor();
+        // Mais estreita que o mínimo (painel apertado): os números cedem antes de a
+        // tabela passar da borda e empurrar o cartão.
+        if Self::NAME_MIN + num * NUM_COLS as f32 > width {
+            num = ((width - Self::NAME_MIN) / NUM_COLS as f32).floor().max(0.0);
+        }
+        let name = (width - num * NUM_COLS as f32).clamp(Self::NAME_MIN, Self::NAME_MAX).floor();
+        Self { name, num }
+    }
+
+    fn width(&self) -> f32 {
+        self.name + self.num * NUM_COLS as f32
+    }
+
+    /// Borda direita da coluna numérica `i`, a partir da esquerda da tabela.
+    fn right(&self, i: usize) -> f32 {
+        self.name + self.num * (i + 1) as f32
+    }
 }
 
 fn projects(ui: &mut Ui, provider: Provider, c: &Consumption, now: i64) {
@@ -366,15 +402,16 @@ fn projects(ui: &mut Ui, provider: Provider, c: &Consumption, now: i64) {
     let expanded_id = Id::new(("usage_expanded", provider.key()));
     let mut expanded: HashSet<String> = ui.data(|d| d.get_temp(expanded_id)).unwrap_or_default();
     let cache_cols = provider == Provider::Claude;
-    let (name_w, num_w) = columns_for(ui.available_width());
+    let cols = Columns::new(ui.available_width());
     let headers = ["Respostas", "Entrada", if cache_cols { "Cache criado" } else { "" }, "Cache lido", "Saída"];
-    table_row(ui, name_w, num_w, ("Projeto", theme::semibold(11.5), INK_3), &headers.map(|h| (h.to_owned(), None)), INK_3, false);
-    crate::app::hairline(ui);
+    table_row(ui, cols, ("Projeto", theme::semibold(11.5), INK_3), &headers.map(|h| (h.to_owned(), None)), INK_3, false);
+    let (line, _) = ui.allocate_exact_size(vec2(cols.width(), 1.0), Sense::hover());
+    ui.painter().hline(line.x_range(), line.center().y, egui::Stroke::new(1.0, theme::HAIRLINE));
     for p in c.projects.iter().take(30) {
         let open = expanded.contains(&p.path);
         let caret = if open { icon::CARET_DOWN } else { icon::CARET_RIGHT };
         let name = format!("{caret}  {}", p.name());
-        let response = table_row(ui, name_w, num_w, (&name, theme::semibold(12.5), INK), &cells(&p.tokens, cache_cols), INK, true);
+        let response = table_row(ui, cols, (&name, theme::semibold(12.5), INK), &cells(&p.tokens, cache_cols), INK, true);
         let models: Vec<String> = p.models.iter().map(|(m, t)| format!("{m}: {} tokens novos", tokens(t.fresh()))).collect();
         if response.on_hover_text(format!("{}\n\n{}", p.path, models.join("\n"))).clicked() {
             if open {
@@ -387,7 +424,7 @@ fn projects(ui: &mut Ui, provider: Provider, c: &Consumption, now: i64) {
             for s in p.sessions.iter().take(20) {
                 let short: String = s.id.chars().take(8).collect();
                 let text = format!("      {short} · {}–{} · {}", moment(s.first, now), moment(s.last, now), crate::usage::model_family(&s.model));
-                table_row(ui, name_w, num_w, (&text, theme::regular(12.0), INK_2), &cells(&s.tokens, cache_cols), INK_2, false)
+                table_row(ui, cols, (&text, theme::regular(12.0), INK_2), &cells(&s.tokens, cache_cols), INK_2, false)
                     .on_hover_text(format!("Sessão {}\nModelo: {}", s.id, s.model));
             }
         }
@@ -413,26 +450,26 @@ fn cells(t: &Tokens, cache_cols: bool) -> [(String, Option<String>); 5] {
 /// ficarem retas.
 fn table_row(
     ui: &mut Ui,
-    name_w: f32,
-    num_w: f32,
+    cols: Columns,
     name: (&str, egui::FontId, Color32),
-    numbers: &[(String, Option<String>); 5],
+    numbers: &[(String, Option<String>); NUM_COLS],
     color: Color32,
     clickable: bool,
 ) -> egui::Response {
     let height = 24.0;
     let sense = if clickable { Sense::click() } else { Sense::hover() };
-    let (rect, response) = ui.allocate_exact_size(vec2(name_w + num_w * 5.0, height), sense);
+    let (rect, response) = ui.allocate_exact_size(vec2(cols.width(), height), sense);
     if clickable && response.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::same(theme::R_SM), theme::GRAPHITE_2);
     }
-    let name_rect = Rect::from_min_size(rect.left_top() + vec2(4.0, 0.0), vec2(name_w - 12.0, height));
+    let name_rect = Rect::from_min_size(rect.left_top() + vec2(4.0, 0.0), vec2(cols.name - 12.0, height));
     paint_truncated(ui, name_rect, name.0, name.1, name.2);
     let header = color == INK_3;
     let font = if header { theme::semibold(11.5) } else { theme::regular(12.5) };
     for (i, (text, tip)) in numbers.iter().enumerate() {
-        let cell = Rect::from_min_size(pos2(rect.left() + name_w + num_w * i as f32, rect.top()), vec2(num_w, height));
-        ui.painter().text(pos2(cell.right() - 6.0, cell.center().y), Align2::RIGHT_CENTER, text, font.clone(), color);
+        let right = rect.left() + cols.right(i);
+        let cell = Rect::from_min_max(pos2(right - cols.num, rect.top()), pos2(right, rect.bottom()));
+        ui.painter().text(pos2(right - CELL_PAD, cell.center().y), Align2::RIGHT_CENTER, text, font.clone(), color);
         if let Some(tip) = tip {
             ui.interact(cell, ui.id().with(("usage_cell", rect.top() as i64, i)), Sense::hover()).on_hover_text(tip);
         }
@@ -579,6 +616,29 @@ mod tests {
         assert_eq!(short_duration(30), "30 s");
         assert_eq!(short_duration(2 * 3600 + 14 * 60 + 5), "2 h 14 min");
         assert_eq!(short_duration(3 * 86_400 + 3600), "3 d 1 h");
+    }
+
+    #[test]
+    fn colunas_do_ranking_em_qualquer_largura() {
+        // Do cartão mais estreito (janela mínima de 980 px) ao de uma tela de 2560 px.
+        for width in [300.0, 480.0, 666.0, 760.0, 1000.0, 1366.0, 1900.0, 2250.0, 5000.0] {
+            let c = Columns::new(width);
+            assert!(c.width() <= width.floor(), "{width}: a tabela passa da borda ({})", c.width());
+            assert!(c.name >= Columns::NAME_MIN && c.name <= Columns::NAME_MAX, "{width}: nome {}", c.name);
+            assert!(c.num <= Columns::NUM_MAX, "{width}: número {}", c.num);
+            // Pixels inteiros: nada de meio pixel somando de quadro em quadro.
+            assert_eq!((c.name.fract(), c.num.fract()), (0.0, 0.0));
+            // A Saída termina na borda da tabela, e cada coluna tem a mesma largura.
+            assert_eq!(c.right(NUM_COLS - 1), c.width());
+            for i in 1..NUM_COLS {
+                assert_eq!(c.right(i) - c.right(i - 1), c.num);
+            }
+        }
+        // Na tela larga, a Saída fica perto do nome, não na outra ponta do cartão.
+        let wide = Columns::new(2250.0);
+        assert!(wide.width() <= Columns::NAME_MAX + Columns::NUM_MAX * NUM_COLS as f32);
+        // Numa janela de 1366 px (cartão de ~1050), os números têm o espaço de "Cache criado".
+        assert!(Columns::new(1050.0).num >= 100.0);
     }
 
     #[test]

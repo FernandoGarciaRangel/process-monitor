@@ -262,6 +262,10 @@ leitura mais nova ganha:
 - Alertas (`alerts::UsageAlerts`, regra pura): 75% e 90% uma vez por janela (dois
   `resets_at` a menos de 30 min são a mesma janela), e a renovação pelo relógio, só de
   janela que chegou a avisar. O estado vai no `usage-state.json`: reabrir não repete.
+- O cartão mostra as janelas por `Limits::shown`: 5 h e semanal sempre; as extras do
+  Codenotch (`weekly_scoped`, `weekly_opus`) só com uso visível e leitura que ainda vale.
+- Ranking por projeto: cabeçalho e linhas usam o mesmo `Columns` (larguras inteiras e
+  com teto). Sem teto, numa tela de 2560 px a "Saída" ia para a outra ponta do cartão.
 - "Sistema" e "IA" dividem a linha na barra lateral (`ui::usage::half_rect`): um item
   inteiro a mais empurraria os cartões para fora da tela de 768 px.
 - A disciplina da consulta segue a do Codenotch (github.com/vinzdg/codenotch, MIT); o
