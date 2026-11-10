@@ -18,6 +18,7 @@ use crate::alerts;
 use crate::tray::Tray;
 use crate::ui::widgets;
 use crate::updater::{self, Updater};
+use crate::usage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -26,6 +27,8 @@ pub enum View {
     Startup,
     Ports,
     System,
+    /// Limites e consumo do Claude e do Codex.
+    Usage,
     Cpu,
     Memory,
     Disk,
@@ -42,6 +45,7 @@ impl View {
             View::Startup => "startup".to_owned(),
             View::Ports => "ports".to_owned(),
             View::System => "system".to_owned(),
+            View::Usage => "usage".to_owned(),
             View::Cpu => "cpu".to_owned(),
             View::Memory => "memory".to_owned(),
             View::Disk => "disk".to_owned(),
@@ -57,6 +61,7 @@ impl View {
             "startup" => View::Startup,
             "ports" => View::Ports,
             "system" => View::System,
+            "usage" => View::Usage,
             "cpu" => View::Cpu,
             "memory" => View::Memory,
             "disk" => View::Disk,
@@ -360,6 +365,15 @@ pub struct App {
     /// Containers do Docker e distros do WSL por trás das portas, lidos com a tela aberta.
     pub containers: containers::Watcher,
     pub container_info: Arc<containers::Info>,
+    /// Limites de IA: a thread `usage` e a última leitura dela.
+    pub usage: usage::Monitor,
+    pub usage_state: Arc<usage::Usage>,
+    /// Consulta própria aos servidores do Claude e do Codex (não oficial). Desligada por padrão.
+    pub usage_network: bool,
+    usage_active: bool,
+    /// Período do ranking de consumo e provedor mostrado na tela "IA".
+    pub usage_week: bool,
+    pub usage_provider: usage::Provider,
 }
 
 const INTERVAL_KEY: &str = "interval_ms";
@@ -380,6 +394,7 @@ const PROBE_HTTP_KEY: &str = "probe_http";
 const HIDDEN_COLUMNS_KEY: &str = "hidden_columns";
 const HISTORY_WINDOW_KEY: &str = "history_window";
 const RULES_KEY: &str = "rules";
+const USAGE_NETWORK_KEY: &str = "usage_network";
 
 /// Tabelas com largura de coluna salva (ver `ui::columns`).
 pub const TABLES: [&str; 4] = ["processes", "ports", "services", "startup"];
@@ -412,6 +427,7 @@ impl App {
             .unwrap_or_default();
         let (relaunch_tx, relaunch_rx) = mpsc::channel();
         let alert_config = load_alert_config(&stored);
+        let usage_network = stored(USAGE_NETWORK_KEY).is_some_and(|v| v == "1");
         let app = Self {
             sampler: Sampler::spawn(
                 cc.egui_ctx.clone(),
@@ -488,6 +504,12 @@ impl App {
             system_info: None,
             containers: containers::Watcher::new(cc.egui_ctx.clone()),
             container_info: Arc::default(),
+            usage: usage::Monitor::spawn(cc.egui_ctx.clone(), usage_network),
+            usage_state: Arc::default(),
+            usage_network,
+            usage_active: false,
+            usage_week: false,
+            usage_provider: usage::Provider::Claude,
         };
         app.install_alerts();
         app.sampler.set_rules(app.rules.clone());
@@ -497,10 +519,17 @@ impl App {
     /// Os alertas são avaliados na thread da coleta e viram balões da bandeja. O alvo do
     /// último fica guardado para o clique no balão abrir o processo ou a porta.
     fn install_alerts(&self) {
+        self.sampler.set_alerts(self.alert_config.clone());
+        self.sampler.set_alert_sink(self.alert_sink());
+        // Os de IA saem da thread `usage`, que também fica viva na bandeja.
+        self.usage.set_alerts(self.alert_config.clone());
+        self.usage.set_alert_sink(self.alert_sink());
+    }
+
+    fn alert_sink(&self) -> crate::sampler::AlertSink {
         let notifier = self.tray.notifier();
         let last = self.last_alert.clone();
-        self.sampler.set_alerts(self.alert_config.clone());
-        self.sampler.set_alert_sink(Box::new(move |alert| {
+        Box::new(move |alert| {
             if let Ok(mut slot) = last.lock() {
                 *slot = Some(alert.target);
             }
@@ -509,14 +538,20 @@ impl App {
                 eprintln!("[alerta] {} | {}", alert.title, alert.body);
             }
             notifier.notify(&alert.title, &alert.body);
-        }));
+        })
     }
 
     pub fn set_alert_config(&mut self, config: alerts::Config) {
         if config != self.alert_config {
             self.alert_config = config;
             self.sampler.set_alerts(self.alert_config.clone());
+            self.usage.set_alerts(self.alert_config.clone());
         }
+    }
+
+    pub fn set_usage_network(&mut self, on: bool) {
+        self.usage_network = on;
+        self.usage.set_network(on);
     }
 
     pub fn is_watched(&self, port: u16) -> bool {
@@ -555,6 +590,7 @@ impl App {
             }
             Some(alerts::Target::Disk) => self.view = View::Disk,
             Some(alerts::Target::Network) => self.view = View::Network,
+            Some(alerts::Target::Usage) => self.view = View::Usage,
             None => {}
         }
     }
@@ -653,6 +689,7 @@ impl App {
         self.set_history_window(HistoryWindow::One);
         self.set_autostart(false, false);
         self.set_alert_config(alerts::Config::default());
+        self.set_usage_network(false);
         self.set_rules(Vec::new());
         for table in TABLES {
             ui::columns::reset_widths(ctx, table);
@@ -1504,6 +1541,13 @@ impl eframe::App for App {
         self.port_status = if self.probe_http { self.prober.latest() } else { Arc::default() };
         self.update_state = self.updater.latest();
         self.announce_update();
+        // O consumo por projeto (os .jsonl) só é lido com a tela aberta.
+        let usage_active = self.view == View::Usage;
+        if usage_active != self.usage_active {
+            self.usage_active = usage_active;
+            self.usage.set_active(usage_active);
+        }
+        self.usage_state = self.usage.latest();
         self.icons.poll(ctx);
         while let Ok(result) = self.relaunch_rx.try_recv() {
             match result {
@@ -1552,6 +1596,7 @@ impl eframe::App for App {
                     View::Startup => ui::startup::show(self, ui, &snap),
                     View::Ports => ui::ports::show(self, ui, &snap),
                     View::System => ui::system::show(self, ui, &snap),
+                    View::Usage => ui::usage::show(self, ui),
                     other => ui::performance::show(self, ui, &snap, other),
                 },
             });
@@ -1594,6 +1639,7 @@ impl eframe::App for App {
         storage.set_string(HIDDEN_COLUMNS_KEY, self.hidden_columns.iter().cloned().collect::<Vec<_>>().join(","));
         storage.set_string(HISTORY_WINDOW_KEY, self.history_window.minutes().to_string());
         storage.set_string(RULES_KEY, rules::to_text(&self.rules));
+        storage.set_string(USAGE_NETWORK_KEY, if self.usage_network { "1" } else { "0" }.to_owned());
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -1651,6 +1697,8 @@ const ALERT_PROBLEMS_ON_KEY: &str = "alert_problems_on";
 const ALERT_DISK_ON_KEY: &str = "alert_disk_on";
 const ALERT_DISK_PERCENT_KEY: &str = "alert_disk_free_percent";
 const ALERT_NETWORK_ON_KEY: &str = "alert_network_on";
+const ALERT_USAGE_ON_KEY: &str = "alert_usage_on";
+const ALERT_USAGE_RESET_ON_KEY: &str = "alert_usage_reset_on";
 
 /// Configuração dos alertas salva; o que faltar ou for inválido fica no padrão.
 fn load_alert_config(stored: &dyn Fn(&str) -> Option<String>) -> alerts::Config {
@@ -1674,6 +1722,8 @@ fn load_alert_config(stored: &dyn Fn(&str) -> Option<String>) -> alerts::Config 
             .filter(|v: &f32| (1.0..=50.0).contains(v))
             .unwrap_or(defaults.disk_free_percent),
         network_enabled: flag(ALERT_NETWORK_ON_KEY, defaults.network_enabled),
+        usage_enabled: flag(ALERT_USAGE_ON_KEY, defaults.usage_enabled),
+        usage_reset_enabled: flag(ALERT_USAGE_RESET_ON_KEY, defaults.usage_reset_enabled),
     }
 }
 
@@ -1690,6 +1740,8 @@ fn save_alert_config(storage: &mut dyn eframe::Storage, c: &alerts::Config) {
     storage.set_string(ALERT_DISK_ON_KEY, flag(c.disk_enabled));
     storage.set_string(ALERT_DISK_PERCENT_KEY, c.disk_free_percent.to_string());
     storage.set_string(ALERT_NETWORK_ON_KEY, flag(c.network_enabled));
+    storage.set_string(ALERT_USAGE_ON_KEY, flag(c.usage_enabled));
+    storage.set_string(ALERT_USAGE_RESET_ON_KEY, flag(c.usage_reset_enabled));
 }
 
 /// Lê a entrada de inicialização. Se ela aponta para outro executável (o app foi
@@ -1725,7 +1777,7 @@ mod tests {
 
     #[test]
     fn preferencias_salvas_voltam_iguais() {
-        for view in [View::Processes, View::Services, View::Startup, View::Ports, View::System, View::Cpu, View::Memory, View::Disk, View::Network, View::Gpu(1)] {
+        for view in [View::Processes, View::Services, View::Startup, View::Ports, View::System, View::Usage, View::Cpu, View::Memory, View::Disk, View::Network, View::Gpu(1)] {
             assert_eq!(View::from_key(&view.key()), Some(view));
         }
         assert_eq!(View::from_key("gpu:x"), None);

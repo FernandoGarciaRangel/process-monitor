@@ -30,9 +30,20 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if nav_item(ui, app.view == View::Ports, icon::PLUGS_CONNECTED, "Portas", &ports.to_string()).clicked() {
         app.view = View::Ports;
     }
-    // Ficha da máquina: sem contador, porque não há o que contar.
-    if nav_item(ui, app.view == View::System, icon::COMPUTER_TOWER, "Sistema", "").clicked() {
+    // Sistema e IA dividem a linha: mais um item inteiro empurraria os cartões para
+    // fora da tela de 768 px. A ficha da máquina não tem contador; a IA mostra o maior
+    // uso de cada provedor.
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+    let system = crate::ui::usage::half_rect(row, false);
+    if nav_item_at(ui, system, app.view == View::System, icon::COMPUTER_TOWER, "Sistema", "", INK_3).clicked() {
         app.view = View::System;
+    }
+    let (badge, hot) = crate::ui::usage::badge(&app.usage_state, crate::usage::now_secs());
+    let ai = crate::ui::usage::half_rect(row, true);
+    let response = nav_item_at(ui, ai, app.view == View::Usage, icon::SPARKLE, "IA", &badge, if hot { ACCENT } else { INK_3 });
+    let response = response.on_hover_text("Limites do Claude e do Codex: o número é o maior uso de cada um (Claude · Codex).");
+    if response.clicked() {
+        app.view = View::Usage;
     }
 
     ui.add_space(12.0);
@@ -211,7 +222,13 @@ pub fn logo_mark(ui: &Ui, rect: Rect) {
 }
 
 fn nav_item(ui: &mut Ui, selected: bool, glyph: &str, label: &str, badge: &str) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+    nav_item_at(ui, rect, selected, glyph, label, badge, INK_3)
+}
+
+/// Item da navegação num retângulo já reservado.
+fn nav_item_at(ui: &mut Ui, rect: Rect, selected: bool, glyph: &str, label: &str, badge: &str, badge_color: Color32) -> Response {
+    let response = ui.interact(rect, ui.id().with(("nav", label)), Sense::click());
     let p = ui.painter();
     let fill = if selected {
         GRAPHITE_2
@@ -225,9 +242,12 @@ fn nav_item(ui: &mut Ui, selected: bool, glyph: &str, label: &str, badge: &str) 
         accent_bar(ui, rect, ACCENT);
     }
     let text_color = if selected { INK } else { INK_2 };
-    p.text(pos2(rect.left() + 14.0, rect.center().y), Align2::LEFT_CENTER, glyph, theme::regular(16.0), text_color);
-    p.text(pos2(rect.left() + 38.0, rect.center().y), Align2::LEFT_CENTER, label, theme::semibold(13.5), text_color);
-    p.text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, badge, theme::regular(12.0), INK_3);
+    // Meia largura (Sistema e IA): tudo um pouco mais junto.
+    let narrow = rect.width() < 150.0;
+    let (glyph_x, label_x, badge_x, badge_size) = if narrow { (12.0, 34.0, 9.0, 11.0) } else { (14.0, 38.0, 12.0, 12.0) };
+    p.text(pos2(rect.left() + glyph_x, rect.center().y), Align2::LEFT_CENTER, glyph, theme::regular(16.0), text_color);
+    p.text(pos2(rect.left() + label_x, rect.center().y), Align2::LEFT_CENTER, label, theme::semibold(13.5), text_color);
+    p.text(pos2(rect.right() - badge_x, rect.center().y), Align2::RIGHT_CENTER, badge, theme::regular(badge_size), badge_color);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

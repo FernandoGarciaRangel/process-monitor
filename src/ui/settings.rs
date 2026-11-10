@@ -17,17 +17,19 @@ enum Section {
     Processes,
     Ports,
     Alerts,
+    Ai,
     Charts,
     Updates,
     About,
 }
 
 impl Section {
-    const ALL: [Section; 7] = [
+    const ALL: [Section; 8] = [
         Section::General,
         Section::Processes,
         Section::Ports,
         Section::Alerts,
+        Section::Ai,
         Section::Charts,
         Section::Updates,
         Section::About,
@@ -39,6 +41,7 @@ impl Section {
             Section::Processes => "Processos",
             Section::Ports => "Portas",
             Section::Alerts => "Alertas",
+            Section::Ai => "IA",
             Section::Charts => "Gráficos",
             Section::Updates => "Atualizações",
             Section::About => "Sobre",
@@ -51,6 +54,7 @@ impl Section {
             Section::Processes => icon::LIST_BULLETS,
             Section::Ports => icon::PLUGS_CONNECTED,
             Section::Alerts => icon::BELL_SIMPLE,
+            Section::Ai => icon::SPARKLE,
             Section::Charts => icon::CHART_LINE,
             Section::Updates => icon::ARROW_CIRCLE_UP,
             Section::About => icon::INFO,
@@ -124,6 +128,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                 Section::Processes => processes(app, ui),
                                 Section::Ports => ports_section(app, ui),
                                 Section::Alerts => alerts_section(app, ui),
+                                Section::Ai => ai_section(app, ui),
                                 Section::Charts => charts(app, ui),
                                 Section::Updates => updates(app, ui),
                                 Section::About => about(app, ui),
@@ -526,6 +531,26 @@ fn alerts_section(app: &mut App, ui: &mut Ui) {
     });
 
     ui.add_space(16.0);
+    heading(ui, "Limites de IA");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        row(
+            ui,
+            "Claude e Codex perto do limite",
+            "Avisa em 75% e em 90% de cada janela (5 h e semanal), uma vez por janela.",
+            40.0,
+            |ui| {
+                widgets::toggle(ui, &mut config.usage_enabled);
+            },
+        );
+        ui.add_enabled_ui(config.usage_enabled, |ui| {
+            row(ui, "Quando renovar", "Uma janela que chegou a avisar recomeçou do zero.", 40.0, |ui| {
+                widgets::toggle(ui, &mut config.usage_reset_enabled);
+            });
+        });
+    });
+
+    ui.add_space(16.0);
     ui.horizontal(|ui| {
         if widgets::ghost_button(ui, &format!("{}  Testar aviso", icon::BELL_SIMPLE_RINGING)).clicked() {
             app.tray.notifier().notify("Teste de alerta", "Os avisos do Process Monitor aparecem assim.");
@@ -536,6 +561,67 @@ fn alerts_section(app: &mut App, ui: &mut Ui) {
     });
 
     app.set_alert_config(config);
+}
+
+/// Limites do Claude e do Codex: de onde vêm e a consulta própria, que é opcional.
+fn ai_section(app: &mut App, ui: &mut Ui) {
+    heading(ui, "Sempre lidos, sem rede");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        for (title, text) in [
+            ("Codenotch", "Se estiver aberto, os arquivos dele em %APPDATA%\\codenotch já trazem as janelas prontas. Com leitura recente dele, o Process Monitor não consulta a rede."),
+            ("Statusline do Claude Code", "Com o statusline-limits.js instalado (veja o README), o Claude Code grava a % das janelas a cada resposta em %LOCALAPPDATA%\\Process Monitor\\claude-limits.json, sem nenhum segredo."),
+            ("Registros locais", "Os .jsonl do Claude Code e os rollouts do Codex CLI dão o consumo por projeto e sessão (e, no Codex CLI, a % de cada rodada)."),
+        ] {
+            row(ui, title, text, 0.0, |_| {});
+            ui.add_space(4.0);
+        }
+    });
+
+    ui.add_space(16.0);
+    heading(ui, "Consulta própria");
+    widgets::card().show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let mut on = app.usage_network;
+        row(
+            ui,
+            "Perguntar aos servidores",
+            "Lê a % direto do Claude (api.anthropic.com) e do Codex (chatgpt.com, ou o codex app-server), com o login que \
+             eles já guardam neste computador. Não é oficial: pode mudar ou ser limitado. No máximo a cada 5 min, e só \
+             quando o Codenotch e a statusline não têm leitura recente.",
+            40.0,
+            |ui| {
+                if widgets::toggle(ui, &mut on).changed() {
+                    app.set_usage_network(on);
+                }
+            },
+        );
+        divider(ui);
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "O login é só lido, na hora da consulta: nunca é renovado, gravado ou mostrado. Login vencido não é \
+                     enviado; abra o Claude Code (ou o Codex) para ele renovar. Se o servidor pedir para esperar (429), a \
+                     espera vale também depois de reabrir o app.",
+                )
+                .font(theme::regular(12.0))
+                .color(INK_3),
+            )
+            .wrap(),
+        );
+    });
+
+    ui.add_space(16.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("A forma de consultar (piso, recuo, formatos) segue a do Codenotch, de código aberto (MIT).")
+                .font(theme::regular(12.0))
+                .color(INK_4),
+        );
+        if link(ui, icon::GITHUB_LOGO, "vinzdg/codenotch").clicked() {
+            crate::platform::shell_open("https://github.com/vinzdg/codenotch");
+        }
+    });
 }
 
 fn ports_section(app: &mut App, ui: &mut Ui) {

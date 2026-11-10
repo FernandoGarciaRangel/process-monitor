@@ -9,6 +9,7 @@ pub mod settings;
 pub mod sidebar;
 pub mod startup;
 pub mod system;
+pub mod usage;
 pub mod widgets;
 
 use egui::{Sense, Stroke, Ui, vec2};

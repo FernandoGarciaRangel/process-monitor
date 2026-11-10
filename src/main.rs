@@ -10,6 +10,7 @@ mod export;
 mod format;
 mod gpu;
 mod health;
+mod http;
 mod icons;
 mod locks;
 mod netcheck;
@@ -24,6 +25,7 @@ mod theme;
 mod tray;
 mod ui;
 mod updater;
+mod usage;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
